@@ -286,6 +286,41 @@ export interface ChatUsage {
   outputTokens?: number
 }
 
+/**
+ * 流式响应里**中途**出现的鉴权错误。
+ *
+ * 上游偶尔会在已经开流之后用一帧 `data: {"error":…}` 报「invalid accessToken」，
+ * 然后直接断开。这类帧不是正文，若原样透传，宿主会把它当内容或直接以「密钥无效」中止。
+ * 这里把它识别出来，交给 shim 记录/处理。
+ */
+export function streamAuthError(line: string): string | undefined {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('data:')) return undefined
+  const payload = trimmed.slice(5).trim()
+  if (payload === '' || payload === '[DONE]') return undefined
+  if (!/error|invalid|unauthor|forbidden|401/i.test(payload)) return undefined
+  try {
+    const parsed = JSON.parse(payload) as unknown
+    if (!isObject(parsed)) return undefined
+    const candidates: unknown[] = []
+    const error = parsed.error
+    if (typeof error === 'string') candidates.push(error)
+    if (isObject(error)) {
+      candidates.push(error.message, error.code, error.type)
+    }
+    candidates.push(parsed.message, parsed.code, parsed.errorCode, parsed.errorMsg)
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string' || candidate === '') continue
+      if (/invalid accessToken|unauthor|forbidden|invalid[ _-]?token|token.*(expired|invalid)|4016/i.test(candidate)) {
+        return candidate
+      }
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
 /** 从一次非流式响应体里取用量。 */
 export function usageFromJson(body: unknown): ChatUsage {
   if (!isObject(body)) return {}

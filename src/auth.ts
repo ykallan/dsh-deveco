@@ -717,9 +717,16 @@ export class DevecoAccountStore {
    * 决定，过期只能重新登录。它的价值是：DSH 开机放一整天不聊天时，第一个请求不必
    * 先等一次续期，同时把「哪个号已经废了」提前暴露在卡片上。
    */
-  async keepAlive(): Promise<{ checked: number; refreshed: number; needsLogin: string[] }> {
+  /**
+   * @param options.skip 返回 true 的账号本轮不碰。
+   *
+   * 后台续期最忌讳「账号正有请求在飞时给它换令牌」：很多网关签发新 accessToken 就会让
+   * 旧的那张失效，正在流式输出的请求会当场被上游判「密钥无效」而中断 —— 这正是
+   * 「推理到一半突然密钥无效」的典型来源。所以有在飞请求的账号一律跳过，等它空下来。
+   */
+  async keepAlive(options: { skip?: (id: string) => boolean } = {}): Promise<{ checked: number; refreshed: number; needsLogin: string[] }> {
     await this.ensureLoaded()
-    const ids = this.doc.order.filter(id => this.doc.accounts[id]?.stale !== true)
+    const ids = this.doc.order.filter(id => this.doc.accounts[id]?.stale !== true && options.skip?.(id) !== true)
     let refreshed = 0
     const needsLogin: string[] = []
     for (const id of ids) {

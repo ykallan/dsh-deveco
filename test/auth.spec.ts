@@ -19,6 +19,12 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode(payload)}.signature`
 }
 
+const OTHER_TOKEN = makeJwt({
+  userId: 'u-2',
+  userName: 'other',
+  exp: Math.floor(Date.now() / 1000) + 86_400,
+})
+
 const TOKEN = makeJwt({
   userId: 'u-1',
   userName: 'tester',
@@ -316,6 +322,32 @@ describe('pre-use refresh policy (freshness gate)', () => {
       expect(resolved?.accessToken).toBe('fresh-15')
     } finally {
       delete process.env.DEVECO_REFRESH_SKEW_MINUTES
+    }
+  })
+  it('skips accounts with an in-flight request when sweeping, so a background refresh cannot rotate the token under a live stream', async () => {
+    const original = globalThis.fetch
+    const refreshedFor: string[] = []
+    globalThis.fetch = (async (_input: unknown, init?: { headers?: Record<string, string> }) => {
+      // 用 jwtToken 头区分是哪个账号在续期。
+      const jwt = init?.headers?.jwtToken ?? ''
+      refreshedFor.push(jwt === OTHER_TOKEN ? 'b' : 'a')
+      return new Response(JSON.stringify({
+        status: true,
+        userInfo: { accessToken: 'fresh', refreshToken: 'r', nationalCode: 'CN', realName: true },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      const store = tempStore()
+      await store.upsert(credential({ accessTokenExpiresAt: Date.now() - 1000 }))
+      await store.upsert({ jwtToken: OTHER_TOKEN, accessToken: 'old-b', accessTokenExpiresAt: Date.now() - 1000 })
+      const outcome = await store.keepAlive({ skip: id => id === 'u-1' })
+      // 只检查/续期了没被跳过的那一个。
+      expect(outcome.checked).toBe(1)
+      expect(refreshedFor).toEqual(['b'])
+      expect((await store.credential('u-1'))?.accessToken).toBe('access')
+      expect((await store.credential('u-2'))?.accessToken).toBe('fresh')
+    } finally {
+      globalThis.fetch = original
     }
   })
 })

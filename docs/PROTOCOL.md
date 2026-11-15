@@ -179,7 +179,11 @@ Do not turn the check-in into a "claim reward" button without an endpoint to bac
 
 ## 7. Error semantics worth preserving
 
-- `401` → the credential is dead: mark the account stale, do not retry it.
+- `401` → the credential is dead **only after** the retry policy is exhausted: sleep 5 s,
+  refresh the token, retry the same account, at most 5 times. The delay matters because
+  the token service propagates a fresh token with a short lag — refreshing immediately
+  after a 401 often still returns the old state. After 5 failures the account is marked
+  for re-login and the request stops.
 - `403 ModelServiceError` / overload → retry on another account.
 - `429` → queue/rate limit → retry on another account.
 - `400` containing `too long` / `prompt length` / `maximum input length` → context

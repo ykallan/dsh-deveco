@@ -703,6 +703,15 @@ function doctorHandler(deps: DevecoRouteOptions): Handler {
         detail: await describeLlmDiagnostics(deps),
       },
       {
+        id: 'auth-retry',
+        ok: (shim.lastAuthRetry ?? 0) < 5,
+        detail: shim.lastStreamAuthError !== undefined
+          ? `upstream denied the token mid-stream: ${shim.lastStreamAuthError}`
+          : shim.lastAuthRetry === undefined || shim.lastAuthRetry === 0
+            ? 'no 401 retry on the last request'
+            : `last request hit 401 and retried ${shim.lastAuthRetry}x (5s + refresh each time)`,
+      },
+      {
         id: 'checkin',
         ok: Object.values(status.checkin.today).some(record => record.ok),
         detail: Object.values(status.checkin.today).some(record => record.ok)

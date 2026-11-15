@@ -507,7 +507,8 @@ export function apply(ctx: Context, rawConfig: Config): void {
   const keepAliveLoop = async (): Promise<void> => {
     if (stopped) return
     try {
-      const outcome = await store.keepAlive()
+      // 有请求在飞的账号不许后台续期：换新令牌会让在飞的流当场被判「密钥无效」。
+      const outcome = await store.keepAlive({ skip: id => (pool.get(id)?.activeConcurrent ?? 0) > 0 })
       if (outcome.refreshed > 0) ctx.logger.debug(`dsh-deveco: refreshed ${outcome.refreshed} access token(s)`)
       if (outcome.needsLogin.length > 0) {
         ctx.logger.debug(`dsh-deveco: ${outcome.needsLogin.length} account(s) need a fresh sign-in`)

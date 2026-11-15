@@ -42,6 +42,7 @@ import {
   identityFromHeaders,
   readErrorText,
   usageFromJson,
+  streamAuthError,
   usageFromSseLine,
   type ChatUsage,
   type UpstreamError,
@@ -53,6 +54,20 @@ const SLOT_WAIT_MS = 5_000
 
 /** 最多换几个账号重试（每个账号只试一次）。 */
 const MAX_ACCOUNT_ATTEMPTS = 3
+
+/**
+ * 上游返回 401 后的重试策略：等 5 秒 → 刷新令牌 → 重试，最多 5 次。
+ *
+ * 等这 5 秒不是礼节：令牌服务有短暂的传播延迟，401 之后立刻刷新经常还是旧状态；
+ * 5 秒能让新令牌真正生效。5 次仍然 401 就认为这个号确实失效，停止本次请求。
+ */
+const AUTH_RETRY_DELAY_MS = 5_000
+const AUTH_RETRY_MAX = 5
+
+/** 实际等待时长（测试可以设成 0 或几毫秒）。 */
+function authRetryDelayMs(): number {
+  return envNumber('DEVECO_AUTH_RETRY_DELAY_MS', AUTH_RETRY_DELAY_MS)
+}
 
 /** 请求体上限。 */
 const MAX_BODY_BYTES = 32 * 1024 * 1024
@@ -98,6 +113,35 @@ export interface ShimStats {
   lastMaxTokens?: number
   /** 最近一次聊天请求里 `stream` 的取值。 */
   lastStream?: boolean
+  /**
+   * 最近一次**流式响应中途**出现的鉴权错误原文。
+   *
+   * 这是排查「推理到一半提示密钥无效」的关键：它说明上游开了流之后才否认令牌，
+   * 通常是令牌在长回合里过期，或被同账号的其它客户端/后台续期轮换掉了。
+   */
+  lastStreamAuthError?: string
+  /** 最近一次请求里，因 401 触发的重试次数（0–5）。 */
+  lastAuthRetry?: number
+}
+
+/** 可被 abort 打断的等待。 */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>(resolve => {
+    if (signal?.aborted === true) {
+      resolve()
+      return
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    timer.unref?.()
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -290,6 +334,14 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
             for (const line of complete.split('\n')) {
               const usageLine = usageFromSseLine(line)
               if (usageLine !== undefined) usageRecord = usageLine
+              // 上游可能已经开流之后才否认令牌：这类帧必须记下来，否则用户只看到
+              // 「推理到一半提示密钥无效」而没有任何可查的线索。
+              const authError = streamAuthError(line)
+              if (authError !== undefined) {
+                stats.lastStreamAuthError = authError
+                stats.lastError = `stream-auth: ${authError}`
+                logger?.warn(`dsh-deveco: upstream denied the token mid-stream: ${authError}`)
+              }
             }
           }
           res.write(value)
@@ -389,7 +441,12 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
           continue
         }
         try {
-          const resolved = await store.resolve(accountId)
+          const wireModel = typeof prepared.model === 'string' ? upstreamModelId(prepared.model) : ''
+          const identity = identityFromHeaders(req.headers as Record<string, string | string[] | undefined>, prepared)
+          const project = headerValue(req.headers as Record<string, string | string[] | undefined>, 'x-deveco-project')
+          const parent = headerValue(req.headers as Record<string, string | string[] | undefined>, 'x-deveco-parent-session')
+
+          let resolved = await store.resolve(accountId)
           if (resolved === undefined) {
             pool.disable(accountId, 'credential needs sign-in')
             lastError = {
@@ -402,36 +459,77 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
             exclude.add(accountId)
             continue
           }
-          const wireModel = typeof prepared.model === 'string' ? upstreamModelId(prepared.model) : ''
-          const identity = identityFromHeaders(req.headers as Record<string, string | string[] | undefined>, prepared)
-          const project = headerValue(req.headers as Record<string, string | string[] | undefined>, 'x-deveco-project')
-          const parent = headerValue(req.headers as Record<string, string | string[] | undefined>, 'x-deveco-parent-session')
-          const requestHeaders = buildChatHeaders(resolved.accessToken, identity, {
-            ...project === undefined ? {} : { project },
-            ...parent === undefined ? {} : { parentSession: parent },
-          })
-          const started = Date.now()
-          let response: Response
-          try {
-            response = await fetch(chatUrl(stream), {
-              method: 'POST',
-              headers: requestHeaders,
-              body: JSON.stringify({ ...prepared, model: wireModel, stream }),
-              signal: controller.signal,
+
+          let response: Response | undefined
+          let started = Date.now()
+          let authAttempts = 0
+          /**
+           * 401 的处理：**等 5 秒 → 刷新令牌 → 重试**，最多 5 次。
+           *
+           * 为什么要等：上游判 401 之后立刻刷新，经常还会拿到旧状态（令牌服务有短暂
+           * 传播延迟），5 秒能让新令牌真正生效。为什么要「重试」而不是直接判死：
+           * accessToken 只有 30 分钟，长回合里中途过期很常见，续期后就能接着推理。
+           */
+          for (;;) {
+            const requestHeaders = buildChatHeaders(resolved.accessToken, identity, {
+              ...project === undefined ? {} : { project },
+              ...parent === undefined ? {} : { parentSession: parent },
             })
-          } catch (error: unknown) {
-            usage.record({ account: accountId, model: wireModel, ok: false, ms: Date.now() - started })
-            pool.noteError(accountId, 3, 30_000, 'network error')
-            lastError = {
-              kind: 'network',
-              status: 0,
-              message: error instanceof Error ? error.message : String(error),
-              retryable: true,
-              needsLogin: false,
+            started = Date.now()
+            try {
+              response = await fetch(chatUrl(stream), {
+                method: 'POST',
+                headers: requestHeaders,
+                body: JSON.stringify({ ...prepared, model: wireModel, stream }),
+                signal: controller.signal,
+              })
+            } catch (error: unknown) {
+              usage.record({ account: accountId, model: wireModel, ok: false, ms: Date.now() - started })
+              pool.noteError(accountId, 3, 30_000, 'network error')
+              lastError = {
+                kind: 'network',
+                status: 0,
+                message: error instanceof Error ? error.message : String(error),
+                retryable: true,
+                needsLogin: false,
+              }
+              exclude.add(accountId)
+              response = undefined
+              break
             }
-            exclude.add(accountId)
-            continue
+
+            if (response.status !== 401) break
+
+            // 401：重试预算用尽 → 停在这里，交给下面统一判断。
+            if (authAttempts >= AUTH_RETRY_MAX) break
+            authAttempts += 1
+            const denied = await readErrorText(response)
+            stats.lastAuthRetry = authAttempts
+            stats.lastError = `upstream 401: ${denied}`
+            logger?.warn(
+              `dsh-deveco: upstream 401 (${denied}); retry ${authAttempts}/${AUTH_RETRY_MAX} `
+              + `after ${authRetryDelayMs()}ms`,
+            )
+            await sleep(authRetryDelayMs(), controller.signal)
+            if (controller.signal.aborted) {
+              lastError = { kind: 'network', status: 0, message: 'request aborted', retryable: false, needsLogin: false }
+              exclude.add(accountId)
+              response = undefined
+              break
+            }
+            const refreshed = await store.forceRefresh(accountId).catch(() => false)
+            if (!refreshed) {
+              logger?.warn('dsh-deveco: refreshing the token after a 401 failed; giving up on this account')
+              break
+            }
+            const again = await store.resolve(accountId)
+            if (again === undefined) break
+            resolved = again
           }
+
+          // 网络失败 / 取消：lastError 已经设好，换下一个号。
+          if (response === undefined) continue
+
           if (response.ok) {
             pool.noteSuccess(accountId)
             // 一次成功就说明这个号本窗口没被额度卡住。
@@ -462,14 +560,34 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
             quota.noteExhausted(accountId, message)
           }
           if (classified.needsLogin) {
-            await store.markRejected(accountId, `upstream ${response.status}: ${message}`)
-            pool.disable(accountId, `upstream ${response.status}`)
+            if (authAttempts >= AUTH_RETRY_MAX) {
+              // 已经按「5 秒 + 刷新」重试满 5 次仍是 401：这个号确实得重新登录。
+              await store.markRejected(accountId, `upstream 401 after ${authAttempts} retries: ${message}`)
+              pool.disable(accountId, `upstream 401 after ${authAttempts} retries`)
+              lastError = {
+                kind: 'auth',
+                status: 401,
+                message: `DevEco rejected the token ${authAttempts} times in a row (${message}); `
+                  + 'sign in again from the DevEco plugin card',
+                retryable: true,
+                needsLogin: true,
+              }
+            } else {
+              // 刷新本身失败了，但令牌未必真的坏：只冷却，不判死账号。
+              pool.noteError(accountId, 3, 20_000, `auth: ${message}`)
+              lastError = classified
+            }
           } else if (classified.kind === 'rate-limit' || classified.kind === 'overloaded' || classified.kind === 'server') {
             pool.noteError(accountId, 3, 20_000, `${classified.kind}: ${message}`)
+            lastError = classified
+          } else {
+            lastError = classified
           }
-          lastError = classified
           exclude.add(accountId)
-          if (!classified.retryable) break
+          // 连续 5 次 401 之后不再换号尝试：按用户要求「停止这次推理」，把明确的错误交回去，
+          // 而不是让外层循环因为「没有可用账号」再抛一个误导性的 429。
+          if (classified.needsLogin && authAttempts >= AUTH_RETRY_MAX) break
+          if (classified.retryable !== true && classified.needsLogin !== true) break
         } finally {
           pool.release(accountId)
         }

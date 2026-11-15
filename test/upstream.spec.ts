@@ -10,6 +10,7 @@ import {
   normalizeAffinityId,
   readErrorText,
   resetChatIdCache,
+  streamAuthError,
   usageFromJson,
   usageFromSseLine,
 } from '../src/upstream.ts'
@@ -185,6 +186,24 @@ describe('firstFrameError', () => {
 
   it('returns undefined for normal frames', () => {
     expect(firstFrameError('data: {"choices":[{"delta":{"content":"hi"}}]}')).toBeUndefined()
+  })
+})
+
+describe('streamAuthError', () => {
+  it('recognises an auth error frame sent after the stream opened', () => {
+    expect(streamAuthError('data: {"error":{"message":"invalid accessToken"}}')).toBe('invalid accessToken')
+    expect(streamAuthError('data: {"errorCode":4016,"errorMsg":"invalid accessToken."}')).toBe('invalid accessToken.')
+    expect(streamAuthError('data: {"message":"unauthorized"}')).toBe('unauthorized')
+  })
+
+  it('ignores ordinary content frames', () => {
+    expect(streamAuthError('data: {"choices":[{"delta":{"content":"hello"}}]}')).toBeUndefined()
+    expect(streamAuthError('data: [DONE]')).toBeUndefined()
+    expect(streamAuthError('event: ping')).toBeUndefined()
+  })
+
+  it('ignores unrelated error frames', () => {
+    expect(streamAuthError('data: {"error":{"message":"model overloaded"}}')).toBeUndefined()
   })
 })
 
