@@ -9,9 +9,16 @@
 pnpm typecheck     # 宿主侧 tsc + 浏览器侧 tsc（两套 tsconfig，别只跑一个）
 pnpm test          # vitest，纯函数为主，不打真实上游
 pnpm build         # tsdown（宿主 ESM + 客户端 CJS），再 wrap-client 包成自注册 bundle
-pnpm deploy        # 把 lib/ 同步到 ~/.dsh/profiles/desktop/node_modules/dsh-deveco
+pnpm deploy        # 仅「拷贝安装」时用：把 lib/ 同步进 profile；link 安装会直接跳过
 node scripts/smoke-apply.mjs   # 离线跑一遍 apply()：路由 / provider 注册 / 门禁，不打上游
 ```
+
+两种本地安装方式，别混用：
+
+| 方式 | profile 依赖 | 生效方式 |
+|---|---|---|
+| **link**（插件管理器按目录安装） | `link:<checkout 绝对路径>`，`node_modules/<pkg>` 是指向 checkout 的链接 | `pnpm build` 后重启 DSH；**不要**再跑 `pnpm deploy`（会把文件拷到自己身上，脚本已拦截） |
+| **拷贝**（`pnpm deploy`） | 版本号或 `file:` 声明 | 每次改动都要 `pnpm build && pnpm deploy` 
 
 **改了宿主侧代码必须重启 DSH 才生效。** 客户端产物由 `dsh-client-hmr` 自动送进浏览器，
 宿主模块不会热载；部署脚本只覆盖内容不同的文件，所以「重启后行为没变」通常是没重新 build。

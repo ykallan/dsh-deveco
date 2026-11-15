@@ -25,19 +25,32 @@
 
 ## 安装
 
-插件是一个 DSH bundle。开发/本地安装：
+插件是一个 DSH bundle。**注意：仓库里没有 `lib/`（构建产物不入库），任何安装方式都要先构建。**
+三种安装方式（本地目录 / npm / git）的完整步骤见 [INSTALL.md](INSTALL.md)。
+
+最短路径：先构建，再在 DSH 的**插件页 → 添加插件**里填这个目录的绝对路径。
 
 ```bash
+git clone https://github.com/ykallan/dsh-deveco.git
+cd dsh-deveco
 pnpm install
-pnpm build          # 产物在 lib/
+pnpm build          # 产物在 lib/：index.mjs + client/index.js
+```
+
+装好后重启 DSH，在 **设置 → 插件 → DSH DevEco Connect** 里登录。
+
+<details>
+<summary>开发者：直接往本机 profile 里部署（拷贝安装）</summary>
+
+```bash
 pnpm deploy         # 同步 lib/ 到 ~/.dsh/profiles/desktop/node_modules/dsh-deveco
 ```
 
-`pnpm deploy` 只做三件事：把 `lib/` 覆盖到 profile 的插件目录、在 profile 的
-`package.json` 里补一条 `dependencies` / `dsh.profile.bundles`、刷新 pnpm 的映射文件。
-它**不会**改动 profile 的默认模型，也不会动 `cordis.patch.yml` 里别的条目。
-
-装好后重启 DSH，在 **设置 → 插件 → DSH DevEco Connect** 里登录。
+它只做三件事：把 `lib/` 覆盖到 profile 的插件目录、在 profile 的 `package.json` 里补一条
+`dependencies` / `dsh.profile.bundles`、刷新 pnpm 的映射文件。它**不会**改动 profile 的
+默认模型，也不会动 `cordis.patch.yml` 里别的条目。如果 profile 里那条依赖是 `link:`
+（插件管理器按目录安装的结果），脚本会直接跳过并提示「build 完重启即可」。
+</details>
 
 ## 使用
 

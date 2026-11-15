@@ -29,9 +29,11 @@ import {
   readdirSync,
   statSync,
   rmSync,
+  lstatSync,
+  realpathSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /** 包内需要进 profile 的顶层文件（lib/ 之外）。 */
@@ -54,6 +56,23 @@ export function assertNoBom(path) {
   const b = readFileSync(path)
   if (b.length >= 3 && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) {
     throw new Error(`BOM detected in ${path} — 部署中止，请检查源文件`)
+  }
+}
+
+/**
+ * 路径是否存在且是符号链接/junction（Windows 的 `link:` 安装就是 junction）。
+ * @param {string} path
+ * @returns {boolean}
+ */
+export function isLinkLike(path) {
+  try {
+    if (!existsSync(path)) return false
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink()) return true
+    // Windows junction 在 lstat 里也是目录，用 realpath 比对才能发现。
+    return realpathSync.native(path) !== resolve(path)
+  } catch {
+    return false
   }
 }
 
@@ -154,6 +173,14 @@ export function deploy(options = {}) {
 
   // 1) 包本体：lib/ 原地同步 + 顶层文件覆盖
   const packageDir = join(profileDir, 'node_modules', pkgName)
+  // link 安装（插件管理器按目录安装时写 `link:`，node_modules 里是指向 checkout 的
+  // 符号链接/junction）下，目标路径就是源目录本身：继续拷只会把文件拷到自己身上。
+  // 这种安装的正确用法是「build 完重启」，所以这里直接停手并说清楚。
+  if (isLinkLike(packageDir)) {
+    log(`· ${packageDir} 是指向 checkout 的链接（link 安装）：不需要拷贝，` +
+      'build 完重启 DSH 即可。要改成拷贝安装，先删掉这个链接。')
+    return { skipped: 'link-install', packageDir }
+  }
   const files = { added: 0, updated: 0, unchanged: 0, pruned: 0 }
   syncTree(srcLib, join(packageDir, 'lib'), files)
   for (const name of PACKAGE_ROOT_FILES) {
