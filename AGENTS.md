@@ -80,6 +80,9 @@ src/client/*       浏览器侧：卡片、底部状态行、侧边栏页
   `DEVECO_OUTPUT_CEILING`（32K），不要退回小数字。
 - **签到不要变成「领积分」**：上游没有这个接口（`docs/PROTOCOL.md` 第 6 节）。它是每日体检。
 - 续期必须单飞并带代际：`refreshToken` 一次性，并发刷新会把账号写成 stale。
+- **续期时机在「取号发请求前」**：`accessToken()` 每次检查剩余寿命，低于
+  `DEVECO_REFRESH_SKEW_MINUTES`（默认 10 分钟）就先刷新再返回；不要改成「过期后补救」。
+  网络失败只冷却 30s、不标 stale；只有上游明确拒绝（JWT 过期 / 401）才算需要重新登录。
 - 每轮结束必须在 `finally` 里 `exitSessionQueue`，否则服务端排队名额会一直漏。
 
 ## 测试口味

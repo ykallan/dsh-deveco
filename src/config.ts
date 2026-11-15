@@ -59,8 +59,23 @@ export const CONTROL_TIMEOUT_MS = 20_000
 /** accessToken 的固定有效期：上游不给 TTL，实测 30 分钟。 */
 export const ACCESS_TOKEN_TTL_MS = 30 * 60 * 1000
 
-/** 提前多久视作「快过期」，触发静默续期。 */
-export const REFRESH_SKEW_MS = 5 * 60 * 1000
+/**
+ * 使用账号前，剩余寿命低于这个值就先刷新（默认 10 分钟）。
+ *
+ * 语义是「**请求前主动续期**」，不是「过期后补救」：每次从账号池取号发请求前都会看一次
+ * `accessTokenExpiresAt`，只要剩余不足 10 分钟就先换新令牌，然后才发聊天请求。
+ * 这样就不会出现「请求打到上游才发现过期 → 401 → 手动刷新」的路径。
+ */
+export const DEFAULT_REFRESH_SKEW_MINUTES = 10
+
+/** 当前生效的提前量（毫秒）。可用 `DEVECO_REFRESH_SKEW_MINUTES` 覆盖。 */
+export function refreshSkewMs(): number {
+  const minutes = envNumber('DEVECO_REFRESH_SKEW_MINUTES', DEFAULT_REFRESH_SKEW_MINUTES)
+  return Math.max(0, minutes) * 60_000
+}
+
+/** 兼容旧引用：默认提前量（毫秒）。运行时请用 `refreshSkewMs()`，它读环境变量。 */
+export const REFRESH_SKEW_MS = DEFAULT_REFRESH_SKEW_MINUTES * 60_000
 
 /** 续期失败后的冷却，避免每个请求都去打上游。 */
 export const REFRESH_COOLDOWN_MS = 30_000

@@ -24,6 +24,7 @@ import type { UsageSnapshot } from './usage.ts'
 import type { ShimStats } from './shim.ts'
 import { DEVECO_PROVIDER } from './adapter.ts'
 import { credentialFromJwtToken } from './login.ts'
+import { ACCESS_TOKEN_TTL_MS, refreshSkewMs } from './config.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 
 export type { CheckinOutcome, CheckinSnapshot } from './checkin.ts'
@@ -120,6 +121,8 @@ export interface DevecoWebStatus {
   shim: ShimStats
   /** 签到到底是什么（一句话说明，卡片直接展示）。 */
   checkinNote: string
+  /** 令牌策略（卡片/体检用来解释「什么时候会自动续期」）。 */
+  authPolicy: { refreshSkewMinutes: number; accessTokenTtlMinutes: number }
   /** provider 是否已经挂到宿主 LLM 层（注册失败时为 false，体检会指出）。 */
   providerRegistered: boolean
   /** 目录最后一次成功刷新的时刻（epoch ms；0 = 从没成功过）。 */
@@ -277,6 +280,10 @@ export async function buildStatus(deps: DevecoRouteOptions): Promise<DevecoWebSt
     writable: true,
     shim: deps.shimStats(),
     checkinNote: deps.checkinNote,
+    authPolicy: {
+      refreshSkewMinutes: Math.round(refreshSkewMs() / 60_000),
+      accessTokenTtlMinutes: Math.round(ACCESS_TOKEN_TTL_MS / 60_000),
+    },
     providerRegistered: deps.providerRegistered(),
     catalogUpdatedAt: deps.catalogUpdatedAt(),
     ...deps.lastDiscoveryError() === undefined ? {} : { lastDiscoveryError: deps.lastDiscoveryError() },

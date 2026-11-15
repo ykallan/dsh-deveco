@@ -493,12 +493,16 @@ export function apply(ctx: Context, rawConfig: Config): void {
 
   // ---- 凭证保活 ------------------------------------------------------------
   /**
-   * 每 20 分钟把「快过期」的 accessToken 提前续掉。
+   * 每 5 分钟扫一遍账号，把「剩余寿命低于提前量（默认 10 分钟）」的 accessToken 提前续掉。
    *
-   * accessToken 只有 30 分钟；用户开着 DSH 不聊天时没有任何请求，凭证会一路裸奔到过期，
-   * 下一个请求就得多等一次续期（甚至因为网络抖动失败一次）。这一轮让第一个请求总是快的。
+   * 为什么是 5 分钟：accessToken 只有 30 分钟，提前量 10 分钟，也就是每张令牌有一个
+   * 20 分钟的「可续期窗口」。扫描间隔必须明显小于这个窗口，才能保证每个账号在一张令牌
+   * 过期前至少被扫到一次 —— 20 分钟的扫描间隔刚好卡在窗口边界上，抖动一下就会滑过去。
+   *
+   * 这一轮只是「没人聊天时也别让凭证裸奔到过期」；真正的第一道防线是
+   * `auth.ts` 的 `accessToken()`：**每次取号发请求前**都会检查剩余寿命，不足 10 分钟就先刷新。
    */
-  const KEEP_ALIVE_INTERVAL_MS = 20 * 60 * 1000
+  const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000
   let keepAliveTimer: ReturnType<typeof setTimeout> | undefined
   const keepAliveLoop = async (): Promise<void> => {
     if (stopped) return

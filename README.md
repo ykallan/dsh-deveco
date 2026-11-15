@@ -105,7 +105,22 @@ DevEco **没有额度查询接口** —— 它一共只暴露登录、`codeGenie
 
 环境变量：`DEVECO_VISION_MODEL`（视觉模型 id）、`DEVECO_TOOL_IMPROVEMENT=1`（上报开关）、
 `DEVECO_MAX_CONCURRENCY` / `DEVECO_MAX_QUEUE` / `DEVECO_QUEUE_COOLDOWN_MS`、
-`UPSTREAM_IDLE_TIMEOUT_MS`、`DSH_HOME`（插件数据目录，默认 `~/.dsh`）。
+`UPSTREAM_IDLE_TIMEOUT_MS`、`DEVECO_MAX_OUTPUT_TOKENS`（单次输出上限，默认 32000）、
+`DEVECO_REFRESH_SKEW_MINUTES`（令牌提前续期阈值，默认 **10** 分钟）、
+`DEVECO_QUOTA_RESET_HOUR`、`DSH_HOME`（插件数据目录，默认 `~/.dsh`）。
+
+### 令牌续期策略
+
+`accessToken` 只有 30 分钟。插件**在每次取号发请求前**检查剩余寿命：
+
+- 剩余 **≥ 10 分钟** → 直接用；
+- 剩余 **< 10 分钟**（含没有到期时间、已过期）→ **先静默刷新，再发请求**，不会拖到过期后
+  才报 401；
+- 刷新被上游明确拒绝（JWT 过期 / 401）→ 账号标记「需重新登录」，请求自动换下一个号；
+- 刷新因网络抖动失败 → 只冷却 30 秒，**不判死账号**；旧令牌若还没真过期就先用它。
+
+后台每 5 分钟还会扫一遍所有账号，把快过期的提前续掉 —— 这样即使你长时间不聊天，
+DSH 里也不会留下一个已经失效的令牌。阈值可用 `DEVECO_REFRESH_SKEW_MINUTES` 调整。
 
 ## 数据落在哪
 

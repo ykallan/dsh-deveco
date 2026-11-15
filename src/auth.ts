@@ -25,7 +25,7 @@ import {
   CONTROL_TIMEOUT_MS,
   DEVECO_JWT_TOKEN_URL,
   REFRESH_COOLDOWN_MS,
-  REFRESH_SKEW_MS,
+  refreshSkewMs,
 } from './config.ts'
 
 /** 手工粘贴 jwtToken 时用的账号 id（没有身份信息可推）。 */
@@ -280,6 +280,16 @@ class AccountSlot {
     this.generation += 1
   }
 
+  /**
+   * 当前凭证是否已被判定失效。
+   *
+   * 用方法而不是直接比较属性：`refresh()` 会改写 `this.cred`，而 TS 对属性的窄化会把
+   * 刷新之后的 `=== true` 比较当成「没有交集」而报错。
+   */
+  private isStale(): boolean {
+    return this.cred.stale === true
+  }
+
   /** 访问令牌还能用多久（毫秒）；没有或已过期 ≤ 0。 */
   private remainingMs(): number {
     const expiresAt = this.cred.accessTokenExpiresAt
@@ -289,20 +299,35 @@ class AccountSlot {
   }
 
   /**
-   * 要一个可用的访问令牌。
+   * 用号前检查：拿一个当前可用的访问令牌。
    *
-   * @returns 令牌；确实是「必须重新登录」时返回 undefined（并已把账号标成 stale）。
+   * 规则（这是「动态控制有效期」的落点，每次从池里取号发请求前都会走一遍）：
+   *  - 剩余寿命 > 提前量（默认 10 分钟）→ 直接用；
+   *  - 剩余 ≤ 提前量（含没有过期时间、令牌为空、已经过期）→ **先刷新再返回**；
+   *  - 刷新被上游明确拒绝（JWT 过期 / 401）→ 标 stale，返回 undefined，让上层换号；
+   *  - 刷新因为网络抖动失败 → 只进 30s 冷却，**不判死账号**；只要旧令牌还没真过期就先用它，
+   *    真的过期了才返回 undefined。这样一次网络抖动不会把好账号写成「需重新登录」。
+   *
+   * @returns 令牌；确实是「必须重新登录」时返回 undefined。
    */
   async accessToken(): Promise<string | undefined> {
-    if (this.cred.stale === true) return undefined
-    if (this.remainingMs() > REFRESH_SKEW_MS) return this.cred.accessToken
-    if (Date.now() < this.blockedUntil) return this.cred.accessToken
-    this.inflight ??= this.refresh().finally(() => {
-      this.inflight = undefined
-    })
-    const outcome = await this.inflight
-    if (outcome === undefined) return undefined
-    return outcome.accessToken
+    if (this.isStale()) return undefined
+    const remaining = this.remainingMs()
+    if (remaining > refreshSkewMs()) return this.cred.accessToken
+    // 需要刷新：冷却期间不重复打上游。
+    if (Date.now() >= this.blockedUntil) {
+      this.inflight ??= this.refresh().finally(() => {
+        this.inflight = undefined
+      })
+      const outcome = await this.inflight
+      if (outcome !== undefined) return outcome.accessToken
+    }
+    if (this.isStale()) return undefined
+    // 刷新失败/冷却中：旧令牌还没真过期就继续用（让上游去判），真过期了才算不可用。
+    if (remaining > 0 && typeof this.cred.accessToken === 'string' && this.cred.accessToken !== '') {
+      return this.cred.accessToken
+    }
+    return undefined
   }
 
   /** 强制续期一次（用户点「刷新凭证」/聊天 401 后重试）。 */

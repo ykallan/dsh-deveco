@@ -234,6 +234,92 @@ describe('DevecoAccountStore', () => {
   })
 })
 
+describe('pre-use refresh policy (freshness gate)', () => {
+  const original = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = original
+  })
+
+  function stubRefresh(accessToken = 'fresh'): () => number {
+    let calls = 0
+    globalThis.fetch = (async () => {
+      calls += 1
+      return new Response(JSON.stringify({
+        status: true,
+        userInfo: { accessToken, refreshToken: 'r2', nationalCode: 'CN', realName: true },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    return () => calls
+  }
+
+  it('refreshes when less than 10 minutes remain', async () => {
+    const calls = stubRefresh('fresh-9')
+    const store = tempStore()
+    await store.upsert(credential({ accessToken: 'old', accessTokenExpiresAt: Date.now() + 9 * 60_000 }))
+    const resolved = await store.resolve('u-1')
+    expect(calls()).toBe(1)
+    expect(resolved?.accessToken).toBe('fresh-9')
+  })
+
+  it('does not refresh when more than 10 minutes remain', async () => {
+    const calls = stubRefresh()
+    const store = tempStore()
+    await store.upsert(credential({ accessToken: 'old', accessTokenExpiresAt: Date.now() + 11 * 60_000 }))
+    const resolved = await store.resolve('u-1')
+    expect(calls()).toBe(0)
+    expect(resolved?.accessToken).toBe('old')
+  })
+
+  it('refreshes when the expiry is unknown', async () => {
+    const calls = stubRefresh('fresh-unknown')
+    const store = tempStore()
+    const { accessTokenExpiresAt: _dropped, ...rest } = credential({ accessToken: 'old' })
+    await store.upsert(rest)
+    const resolved = await store.resolve('u-1')
+    expect(calls()).toBe(1)
+    expect(resolved?.accessToken).toBe('fresh-unknown')
+  })
+
+  it('keeps a still-valid token when the refresh fails transiently, without marking the account stale', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('network down')
+    }) as typeof fetch
+    const store = tempStore()
+    await store.upsert(credential({ accessToken: 'still-good', accessTokenExpiresAt: Date.now() + 5 * 60_000 }))
+    const resolved = await store.resolve('u-1')
+    // 还剩 5 分钟：刷新失败也先用旧令牌，让上游去判定。
+    expect(resolved?.accessToken).toBe('still-good')
+    expect((await store.list())[0]?.usable).toBe(true)
+  })
+
+  it('gives up only when the token has really expired and the refresh failed', async () => {
+    globalThis.fetch = (async () => {
+      throw new Error('network down')
+    }) as typeof fetch
+    const store = tempStore()
+    await store.upsert(credential({ accessToken: 'dead', accessTokenExpiresAt: Date.now() - 60_000 }))
+    expect(await store.resolve('u-1')).toBeUndefined()
+    // 网络失败不等于凭证失效：不能把账号标成「需重新登录」。
+    expect((await store.list())[0]?.usable).toBe(true)
+  })
+
+  it('honours DEVECO_REFRESH_SKEW_MINUTES', async () => {
+    process.env.DEVECO_REFRESH_SKEW_MINUTES = '20'
+    try {
+      const calls = stubRefresh('fresh-15')
+      const store = tempStore()
+      // 剩 15 分钟：默认 10 分钟不刷新，但提前量改成 20 分钟后应当刷新。
+      await store.upsert(credential({ accessToken: 'old', accessTokenExpiresAt: Date.now() + 15 * 60_000 }))
+      const resolved = await store.resolve('u-1')
+      expect(calls()).toBe(1)
+      expect(resolved?.accessToken).toBe('fresh-15')
+    } finally {
+      delete process.env.DEVECO_REFRESH_SKEW_MINUTES
+    }
+  })
+})
+
 describe('verifyJwtToken', () => {
   it('reports false on 401 and true on status:true', async () => {
     const original = globalThis.fetch
