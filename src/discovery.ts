@@ -77,14 +77,34 @@ function stringList(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '').map(item => item.trim())
 }
 
-/** `output` 上游有时给字符串、有时给数字。 */
-function parsePositiveInt(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value)
-  if (typeof value === 'string') {
-    const parsed = Number.parseInt(value, 10)
-    if (Number.isFinite(parsed) && parsed > 0) return parsed
+/**
+ * 解析上游的窗口 / 输出上限，**带 K/M 单位**。
+ *
+ * 实测上游两种写法都会出现：
+ *  - 纯数字：`context_window: 170000`（就是 tokens）；
+ *  - 带单位字符串：`context_window: "1024K"`、`output: "32K"`。
+ *
+ * 以前只用 `parseInt`，`"1024K"` 会被截成 **1024**、`"198K"` 截成 **198** —— 于是模型在
+ * DSH 里成了「上下文 198 token」的废模型（选择器里基本不可用），而且从数据上完全看不出
+ * 是解析错，只会以为上游给了个怪值。
+ */
+export function parseTokenCount(value: unknown): number | undefined {
+  let amount: number | undefined
+  let multiplier = 1
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    amount = value
+  } else if (typeof value === 'string') {
+    const match = /^\s*([\d][\d_,.]*)\s*([kKmM])?/.exec(value)
+    if (match === null) return undefined
+    const parsed = Number.parseFloat((match[1] ?? '').replace(/[_,]/g, ''))
+    if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+    amount = parsed
+    const suffix = (match[2] ?? '').toLowerCase()
+    if (suffix === 'k') multiplier = 1024
+    else if (suffix === 'm') multiplier = 1024 * 1024
   }
-  return undefined
+  if (amount === undefined) return undefined
+  return Math.max(1, Math.floor(amount * multiplier))
 }
 
 /**
@@ -115,12 +135,30 @@ function typedObject(value: unknown): object | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value : undefined
 }
 
+/**
+ * 明显是「千 token 单位」的窗口值下限。
+ *
+ * 上游有两种写法（见 `parseTokenCount`）：带 `K` 后缀的会被换算，**但实测也遇到过不带后缀
+ * 的小整数**（`context_window: 1024`、`198`），那显然不是 1024 个 token —— 真实值应是
+ * 1024K / 198K。没有后缀就无法从字面区分，所以用「小于 4096」当判据：没有任何在用的对话
+ * 模型会声明这么小的窗口，而换算后正好落在合理区间（1M / 198K）。
+ */
+const SUSPICIOUS_SMALL_WINDOW = 4_096
+/** 输出上限的同类判据（`output: 32` 显然指 32K）。 */
+const SUSPICIOUS_SMALL_OUTPUT = 512
+
+/** 把「看起来是 K 单位」的值还原成 tokens。 */
+export function expandSuspiciousCount(value: number | undefined, floor: number): number | undefined {
+  if (value === undefined) return undefined
+  return value < floor ? value * 1024 : value
+}
+
 /** 一条 `model_configs` 条目 → 目录项；无法识别时 undefined。 */
 export function toModelInfo(entry: ModelConfigEntry): DevecoModelInfo | undefined {
   const wireId = typeof entry.model_id === 'string' ? entry.model_id.trim() : ''
   if (wireId === '') return undefined
-  const windows = parsePositiveInt(entry.context_window)
-  const maxTokens = parsePositiveInt(entry.output)
+  const windows = expandSuspiciousCount(parseTokenCount(entry.context_window), SUSPICIOUS_SMALL_WINDOW)
+  const maxTokens = expandSuspiciousCount(parseTokenCount(entry.output), SUSPICIOUS_SMALL_OUTPUT)
   const modalities = stringList(entry.input_modalities).filter(item => ALLOWED_MODALITIES.has(item))
   const info: DevecoModelInfo = {
     id: exposedModelId(wireId),
@@ -176,14 +214,50 @@ export function parseModelConfig(raw: unknown): ModelConfigFetch {
   }
 }
 
-/** 拉一个账号的模型目录。 */
+/** 单次 modelConfig 的预算。实测上游偶尔要 10s 以上才回，8s 太紧（会误判成网络故障）。 */
+export const MODEL_CONFIG_TIMEOUT_MS = 20_000
+
+/** 失败重试次数（网络抖动/超时；鉴权失败不重试）。 */
+const MODEL_CONFIG_RETRIES = 1
+
+/**
+ * 拉一个账号的模型目录。
+ *
+ * 上游这个接口很不稳定：同一时刻会回 200 空列表、`errorCode: 4016`、或者十几秒才响应。
+ * 一旦失败，宿主的模型选择器就可能是空的 —— 所以这里带一次重试，并把超时放宽到 20s。
+ */
 export async function fetchModelConfig(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<ModelConfigFetch> {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= MODEL_CONFIG_RETRIES; attempt += 1) {
+    try {
+      return await fetchModelConfigOnce(accessToken, signal)
+    } catch (error: unknown) {
+      lastError = error
+      const message = error instanceof Error ? error.message : String(error)
+      // 鉴权问题重试没有意义；网络/超时/空目录才值得再来一次。
+      if (/401|403|4016|invalid accessToken/i.test(message)) break
+      if (signal?.aborted === true) break
+      if (attempt < MODEL_CONFIG_RETRIES) {
+        await new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, 800)
+          timer.unref?.()
+        })
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError))
+}
+
+async function fetchModelConfigOnce(
   accessToken: string,
   signal?: AbortSignal,
 ): Promise<ModelConfigFetch> {
   const url = `${DEVECO_MODEL_CONFIG_URL}?localVersion=0&pluginVersion=${encodeURIComponent(DEVECO_CLIENT_TAG)}`
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 8_000)
+  const timer = setTimeout(() => controller.abort(), MODEL_CONFIG_TIMEOUT_MS)
   timer.unref?.()
   signal?.addEventListener('abort', () => controller.abort(), { once: true })
   try {
@@ -196,6 +270,12 @@ export async function fetchModelConfig(
       throw new Error(`modelConfig returned HTTP ${response.status}`)
     }
     const body = await response.json() as unknown
+    // 上游的失败体液里带 `errorCode`（例如 4016 invalid accessToken），HTTP 却是 200。
+    const errorCode = (typedObject(body) as { errorCode?: unknown } | undefined)?.errorCode
+    if (typeof errorCode === 'number' && errorCode !== 0) {
+      const errorMsg = (typedObject(body) as { errorMsg?: unknown } | undefined)?.errorMsg
+      throw new Error(`modelConfig returned errorCode ${errorCode}${typeof errorMsg === 'string' ? `: ${errorMsg}` : ''}`)
+    }
     const code = (typedObject(body) as { code?: unknown } | undefined)?.code
     if (code !== undefined && code !== 200) {
       throw new Error(`modelConfig returned code ${String(code)}`)

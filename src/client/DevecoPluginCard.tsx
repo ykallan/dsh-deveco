@@ -539,6 +539,9 @@ export function DevecoPluginCard({ t }: DevecoPluginCardInjected): ReactElement 
 
       {tab === 'models' ? (
         <section id="deveco-panel-models" role="tabpanel" aria-labelledby="deveco-tab-models" className={styles.section}>
+          {status?.lastDiscoveryError === undefined ? null : (
+            <div className={styles.error}>{t('catalogStale', { message: status.lastDiscoveryError })}</div>
+          )}
           <div className={styles.toolbar}>
             <Button variant="outline" size="sm" disabled={busy === 'refresh-models'} onClick={() => void refreshModels()}>
               {busy === 'refresh-models' ? t('refreshing') : t('refreshModels')}
@@ -562,8 +565,7 @@ export function DevecoPluginCard({ t }: DevecoPluginCardInjected): ReactElement 
               {selection === undefined || !selection.restricted ? t('selectionAll') : t('selectionRestricted')}
             </span>
           </div>
-          {(selection?.choices ?? []).length === 0 ? (
-            <>
+          {(selection?.choices ?? []).length === 0 ? (            <>
               <p className={styles.muted}>{t('modelsEmpty')}</p>
               <p className={styles.muted}>{t('modelsEmptyHint')}</p>
             </>

@@ -402,6 +402,28 @@ export function apply(ctx: Context, rawConfig: Config): void {
       refreshModels,
       shimStats: (): ShimStats => shim.stats(),
       providerRegistered: () => providerRegistered,
+      // 直接问宿主 LLM 层：这才是「聊天框里能不能选到」的数据来源。
+      llmDiagnostics: async () => {
+        try {
+          const providers = ctx.llm.listProviders()
+          const out: { id: string; name: string; models: number; error?: string }[] = []
+          for (const provider of providers) {
+            let models = 0
+            let error: string | undefined
+            try {
+              models = (await ctx.llm.listModels(provider.id)).length
+            } catch (caught: unknown) {
+              error = caught instanceof Error ? caught.message : String(caught)
+            }
+            out.push({ id: provider.id, name: provider.name, models, ...error === undefined ? {} : { error } })
+          }
+          return { providers: out }
+        } catch (caught: unknown) {
+          return { providers: [], error: caught instanceof Error ? caught.message : String(caught) }
+        }
+      },
+      catalogUpdatedAt: () => catalogUpdatedAt,
+      lastDiscoveryError: () => lastDiscoveryError,
       startLogin: startLoginForCard,
       pollLogin,
       version: DEVECO_VERSION,
@@ -433,18 +455,27 @@ export function apply(ctx: Context, rawConfig: Config): void {
   let discoveryTimer: ReturnType<typeof setTimeout> | undefined
   let emptyStreak = 0
   const abort = new AbortController()
+  /** 目录最后一次成功刷新的时刻（0 = 从没成功过）。卡片/体检用它判断「看到的模型是不是旧的」。 */
+  let catalogUpdatedAt = 0
+  /** 最近一次发现失败的原因（给体检用，别让用户只能靠猜）。 */
+  let lastDiscoveryError: string | undefined
 
   const discoverLoop = async (): Promise<void> => {
     if (stopped) return
     try {
       await syncPool()
       const outcome = await refreshCatalog(store, catalog, abort.signal)
+      catalogUpdatedAt = outcome.anySucceeded ? Date.now() : catalogUpdatedAt
+      lastDiscoveryError = outcome.anySucceeded
+        ? undefined
+        : outcome.accounts.flatMap(account => account.errors).slice(0, 3).join(' | ') || 'no account'
       if (outcome.anySucceeded) {
         ctx.logger.debug(`dsh-deveco: model catalog refreshed (${outcome.models.length} models)`)
       } else if ((await store.ids()).length > 0) {
         ctx.logger.debug('dsh-deveco: model discovery found nothing usable; keeping the current catalog')
       }
     } catch (error: unknown) {
+      lastDiscoveryError = error instanceof Error ? error.message : String(error)
       ctx.logger.debug('dsh-deveco: model discovery failed; keeping the current catalog', error)
     }
     if (stopped) return
@@ -538,8 +569,29 @@ export function apply(ctx: Context, rawConfig: Config): void {
   void shim.ready
     .then(async () => {
       if (stopped) return
-      // 先把池和目录对齐，再让 provider 挂上：目录空起步，模型要等第一轮发现填进来。
+      // 先把池和目录对齐。**第一轮发现要在注册 provider 之前完成**：宿主的模型选择器
+      // 往往只在打开时取一次 `listModels()`，如果那一刻目录还是空的，用户就会看到
+      // 「provider 有了但一个模型都没有」—— 而且之后目录填好了，选择器也不会自己刷新。
+      // 这里给第一轮一个上限，失败了照样注册（还能靠卡片上的「刷新模型」补）。
       await syncPool()
+      await Promise.race([
+        (async () => {
+          try {
+            const outcome = await refreshCatalog(store, catalog)
+            if (outcome.anySucceeded) catalogUpdatedAt = Date.now()
+            else lastDiscoveryError = outcome.accounts.flatMap(a => a.errors).slice(0, 3).join(' | ') || 'no account'
+          } catch (error: unknown) {
+            lastDiscoveryError = error instanceof Error ? error.message : String(error)
+          }
+        })(),
+        new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, 25_000)
+          timer.unref?.()
+        }),
+      ])
+      if (stopped) return
+      ctx.logger.debug(`dsh-deveco: first discovery done (${catalog.current().length} model(s) known)`)
+      // 后续的定时刷新交给循环（第一轮已经跑过，这里只是把节奏接上）。
       void discoverLoop()
       void keepAliveLoop()
       armAutoCheckin()

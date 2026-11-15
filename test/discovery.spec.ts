@@ -3,9 +3,40 @@ import {
   fetchModelConfig,
   parseModelConfig,
   parseReasoningEfforts,
+  parseTokenCount,
   toModelInfo,
 } from '../src/discovery.ts'
 import { backfillParams, filterEnabledModels, HIDDEN_MODELS, mergeModelLists } from '../src/catalog.ts'
+
+describe('parseTokenCount', () => {
+  it('keeps plain numbers as tokens', () => {
+    expect(parseTokenCount(170_000)).toBe(170_000)
+    expect(parseTokenCount('170000')).toBe(170_000)
+    expect(parseTokenCount('32768')).toBe(32_768)
+  })
+
+  it('expands K and M suffixes instead of truncating them', () => {
+    // 回归：以前 parseInt('1024K') 会得到 1024，模型于是成了「上下文 1024 token」。
+    expect(parseTokenCount('1024K')).toBe(1_048_576)
+    expect(parseTokenCount('198k')).toBe(202_752)
+    expect(parseTokenCount('32K')).toBe(32_768)
+    expect(parseTokenCount('1M')).toBe(1_048_576)
+    expect(parseTokenCount('1.5M')).toBe(1_572_864)
+  })
+
+  it('tolerates separators and surrounding spaces', () => {
+    expect(parseTokenCount(' 1_048_576 ')).toBe(1_048_576)
+    expect(parseTokenCount('170,000')).toBe(170_000)
+  })
+
+  it('rejects junk', () => {
+    expect(parseTokenCount(0)).toBeUndefined()
+    expect(parseTokenCount(-5)).toBeUndefined()
+    expect(parseTokenCount('')).toBeUndefined()
+    expect(parseTokenCount('abc')).toBeUndefined()
+    expect(parseTokenCount(undefined)).toBeUndefined()
+  })
+})
 
 const GROUP = {
   protocol: 'openai',
@@ -78,6 +109,27 @@ describe('toModelInfo', () => {
 
   it('accepts a numeric output field', () => {
     expect(toModelInfo(GROUP.model_configs[1])?.maxTokens).toBe(32_000)
+  })
+
+  it('expands a K-suffixed window (upstream sends both forms)', () => {
+    const info = toModelInfo({ model_id: 'glm-5.2', context_window: '198K', output: '32K' })
+    expect(info?.contextWindow).toBe(202_752)
+    expect(info?.maxTokens).toBe(32_768)
+    expect(info?.contextWindowKnown).toBe(true)
+  })
+
+  it('expands a bare small integer that can only mean K units', () => {
+    // 实测上游有 `context_window: 1024` / `198` 这种不带后缀的写法：
+    // 1024 token 的对话模型不存在，真实值是 1024K / 198K。
+    const info = toModelInfo({ model_id: 'deepseek-v4.1-flash-1017', context_window: 1024, output: 32 })
+    expect(info?.contextWindow).toBe(1_048_576)
+    expect(info?.maxTokens).toBe(32_768)
+  })
+
+  it('leaves a plausible token count untouched', () => {
+    const info = toModelInfo({ model_id: 'GLM-5.1', context_window: 170_000, output: 32_000 })
+    expect(info?.contextWindow).toBe(170_000)
+    expect(info?.maxTokens).toBe(32_000)
   })
 
   it('detects image input', () => {

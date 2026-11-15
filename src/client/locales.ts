@@ -55,6 +55,7 @@ export interface DevecoSettingsKey {
 
   modelsEmpty: string
   modelsEmptyHint: string
+  catalogStale: string
   refreshModels: string
   refreshing: string
   modelContext: string
@@ -162,6 +163,7 @@ export const zh: DevecoSettingsKey = {
 
   modelsEmpty: '模型目录是空的',
   modelsEmptyHint: '登录后会自动从上游拉取模型列表；也可以点下面的「刷新模型」。',
+  catalogStale: '上次刷新模型失败（现在显示的是旧目录）：{message}',
   refreshModels: '刷新模型',
   refreshing: '刷新中…',
   modelContext: '{tokens} 上下文',
@@ -269,6 +271,7 @@ export const en: DevecoSettingsKey = {
 
   modelsEmpty: 'The model catalog is empty',
   modelsEmptyHint: 'Signing in pulls the upstream catalog automatically; you can also press "Refresh models".',
+  catalogStale: 'The last catalog refresh failed (showing the previous list): {message}',
   refreshModels: 'Refresh models',
   refreshing: 'Refreshing…',
   modelContext: '{tokens} context',

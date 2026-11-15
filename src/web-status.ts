@@ -122,6 +122,10 @@ export interface DevecoWebStatus {
   checkinNote: string
   /** provider 是否已经挂到宿主 LLM 层（注册失败时为 false，体检会指出）。 */
   providerRegistered: boolean
+  /** 目录最后一次成功刷新的时刻（epoch ms；0 = 从没成功过）。 */
+  catalogUpdatedAt: number
+  /** 最近一次模型发现失败的原因（成功时为 undefined）。 */
+  lastDiscoveryError?: string
 }
 
 /** 模型勾选面板的数据。 */
@@ -153,6 +157,20 @@ export interface DevecoRouteOptions {
   shimStats: () => ShimStats
   /** provider 是否已注册（ctx.llm.registerAdapter 成功之后为 true）。 */
   providerRegistered: () => boolean
+  /**
+   * 宿主 LLM 层实际看到的 provider 与模型数。
+   *
+   * 排查「模型列表里有、聊天框选择器里没有」的第一手段：它问的是宿主的
+   * `llm.listProviders()` / `llm.listModels()`，不是插件自己的目录。
+   */
+  llmDiagnostics: () => Promise<{
+    providers: { id: string; name: string; models: number; error?: string }[]
+    error?: string
+  }>
+  /** 目录最后一次成功刷新的时刻（0 = 从没成功）。 */
+  catalogUpdatedAt: () => number
+  /** 最近一次发现失败的原因。 */
+  lastDiscoveryError: () => string | undefined
   startLogin: (options: { accountId?: string }) => Promise<{ url: string; port: number; result: Promise<unknown>; cancel: () => void }>
   pollLogin: (url: string) => { state: 'pending' | 'done' | 'error'; kind?: string; message?: string; accountId?: string }
   version: string
@@ -260,6 +278,8 @@ export async function buildStatus(deps: DevecoRouteOptions): Promise<DevecoWebSt
     shim: deps.shimStats(),
     checkinNote: deps.checkinNote,
     providerRegistered: deps.providerRegistered(),
+    catalogUpdatedAt: deps.catalogUpdatedAt(),
+    ...deps.lastDiscoveryError() === undefined ? {} : { lastDiscoveryError: deps.lastDiscoveryError() },
   }
 }
 
@@ -516,8 +536,7 @@ function checkinHandler(deps: DevecoRouteOptions): Handler {
   }
 }
 
-function quotaHandler(deps: DevecoRouteOptions): Handler {
-  return async (req, res) => {
+function quotaHandler(deps: DevecoRouteOptions): Handler {  return async (req, res) => {
     if (!loopbackRequest(req)) {
       json(res, 403, { error: 'request-not-trusted' })
       return
@@ -598,6 +617,28 @@ function dockHandler(deps: DevecoRouteOptions): Handler {
   }
 }
 
+/**
+ * 把「宿主 LLM 层实际看到了什么」写成一句人话。
+ *
+ * 排查「模型列表有、聊天框选择器没有」时，这一条是第一现场：
+ * 它问的是宿主的 `llm.listProviders()` / `llm.listModels()`，不是插件自己的目录。
+ */
+async function describeLlmDiagnostics(deps: DevecoRouteOptions): Promise<string> {
+  let diagnostics
+  try {
+    diagnostics = await deps.llmDiagnostics()
+  } catch (error: unknown) {
+    return `host llm query failed: ${safeMessage(error)}`
+  }
+  if (diagnostics.error !== undefined) return `host llm query failed: ${diagnostics.error}`
+  const deveco = diagnostics.providers.find(provider => provider.id === DEVECO_PROVIDER)
+  if (deveco === undefined) {
+    return `host does not list provider "${DEVECO_PROVIDER}" `
+      + `(it lists: ${diagnostics.providers.map(provider => provider.id).join(', ') || 'none'})`
+  }
+  return `host lists "${DEVECO_PROVIDER}" with ${deveco.models} model(s)`
+}
+
 function doctorHandler(deps: DevecoRouteOptions): Handler {
   return async (req, res) => {
     if (!loopbackRequest(req)) {
@@ -636,6 +677,11 @@ function doctorHandler(deps: DevecoRouteOptions): Handler {
         detail: status.providerRegistered ? 'provider deveco is registered' : 'provider deveco is NOT registered',
       },
       {
+        id: 'providers',
+        ok: status.providerRegistered && status.accounts.length > 0 && status.models.length > 0,
+        detail: await describeLlmDiagnostics(deps),
+      },
+      {
         id: 'checkin',
         ok: Object.values(status.checkin.today).some(record => record.ok),
         detail: Object.values(status.checkin.today).some(record => record.ok)
@@ -656,6 +702,10 @@ function doctorHandler(deps: DevecoRouteOptions): Handler {
         version: status.version,
         node: status.node,
         checks,
+        // 把宿主 LLM 层的原始视图也带上：卡片只显示一句话，导出报告时要用完整数据。
+        llm: await deps.llmDiagnostics().catch((error: unknown) => ({ providers: [], error: safeMessage(error) })),
+        catalogUpdatedAt: status.catalogUpdatedAt,
+        ...status.lastDiscoveryError === undefined ? {} : { lastDiscoveryError: status.lastDiscoveryError },
         hints: status.accounts.length === 0 ? ['sign in with a Huawei account that has DevEco access'] : [],
       },
     })
