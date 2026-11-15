@@ -188,6 +188,53 @@ describe('shim 401 handling', () => {
     }
   })
 
+  it('records a TTL sample when upstream 401s a token it issued 20 minutes ago', async () => {
+    // 令牌签发于 20 分钟前 → 这次 401 就是一个「20 分钟寿命」的上界样本。
+    const harness = await buildShim(credential({
+      accessToken: 'aging-token',
+      accessTokenIssuedAt: Date.now() - 20 * 60_000,
+      // 本地认为还剩 25 分钟（> 提前量），所以这次请求不会先刷新 —— 401 的样本年龄才是真的 20 分钟。
+      accessTokenExpiresAt: Date.now() + 25 * 60_000,
+    }))
+    let chatAttempts = 0
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (isLoopback(url)) return realFetch(input as never)
+      if (url.includes('/jwToken/check')) {
+        return new Response(JSON.stringify({
+          status: true,
+          userInfo: { accessToken: 'fresh-token', refreshToken: 'r', nationalCode: 'CN', realName: true },
+        }), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url.includes('/chat/completions')) {
+        chatAttempts += 1
+        if (chatAttempts === 1) {
+          return new Response(JSON.stringify({ error: { message: 'invalid accessToken' } }), {
+            status: 401,
+            headers: { 'content-type': 'application/json' },
+          })
+        }
+        return new Response(SSE_BODY, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected upstream call: ${url}`)
+    }) as typeof fetch
+
+    try {
+      const result = await chat(harness, {
+        model: 'GLM-5.1-DevEco',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      })
+      expect(result.status).toBe(200)
+      const summary = (await harness.store.list())[0]
+      expect(summary?.ttlSamples).toBe(1)
+      // 一个样本还不够覆盖默认值，但记录本身必须落地。
+      expect(summary?.ttlSource).toBe('default')
+    } finally {
+      await harness.close()
+    }
+  })
+
   it('marks the account only when the refresh is also rejected', async () => {
     const harness = await buildShim(credential())
     globalThis.fetch = (async (input: string | URL | Request) => {
@@ -195,7 +242,7 @@ describe('shim 401 handling', () => {
       if (isLoopback(url)) return realFetch(input as never)
       if (url.includes('/jwToken/check')) {
         // 续期也被拒：这才是真的需要重新登录。
-        return new Response(JSON.stringify({ status: false }), {
+        return new Response(JSON.stringify({ status: false, errorCode: 4016, errorMsg: 'invalid accessToken.' }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         })

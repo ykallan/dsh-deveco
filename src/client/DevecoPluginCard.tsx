@@ -95,6 +95,15 @@ function AccountRow({
           {account.accessTokenExpiresAt === undefined ? null : (
             <span>{t('accountAccessExpires', { time: formatWhen(account.accessTokenExpiresAt) })}</span>
           )}
+          {account.ttlMs > 0 ? (
+            <span title={t('quotaNote')}>
+              {t('accountTtlLearned', {
+                ttl: Math.round(account.ttlMs / 60_000),
+                source: account.ttlSource,
+                samples: account.ttlSamples,
+              })}
+            </span>
+          ) : null}
           {account.slot === undefined ? null : (
             <span>{account.slot.activeConcurrent}/{account.slot.maxConcurrent}</span>
           )}

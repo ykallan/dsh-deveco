@@ -292,20 +292,24 @@ export async function credentialFromJwtToken(
 ): Promise<DevecoCredential> {
   const payload = parseJwtPayload(jwtToken)
   const refreshed = await requestTokenRefresh(jwtToken, options.signal)
-  if (refreshed === undefined) {
-    throw new LoginError('exchange', 'the jwtToken could not be exchanged for an access token')
+  if (!refreshed.ok) {
+    // 网络抖动也走这里，但登录本来就是一次显式操作，重试即可，不该被当成「密钥无效」。
+    throw new LoginError('exchange', `the jwtToken could not be exchanged for an access token (${refreshed.kind}: ${refreshed.message})`)
   }
+  const value = refreshed.value
   const now = Date.now()
   return {
     jwtToken,
-    accessToken: refreshed.accessToken,
+    accessToken: value.accessToken,
+    // 记下签发时刻：后续 401 时用它算出「这张令牌活了多久」，作为 TTL 的上界样本。
+    accessTokenIssuedAt: now,
     accessTokenExpiresAt: now + ACCESS_TOKEN_TTL_MS,
-    ...refreshed.refreshToken === undefined ? {} : { refreshToken: refreshed.refreshToken },
+    ...value.refreshToken === undefined ? {} : { refreshToken: value.refreshToken },
     ...payload.userId === undefined ? {} : { userId: payload.userId },
     ...payload.userName === undefined ? {} : { userName: payload.userName },
     ...payload.nationalCode === undefined ? {} : { nationalCode: payload.nationalCode },
     ...payload.isRealName === undefined ? {} : { isRealName: payload.isRealName },
-    ...refreshed.isRealName === undefined ? {} : { isRealName: refreshed.isRealName },
+    ...value.isRealName === undefined ? {} : { isRealName: value.isRealName },
     ...options.label === undefined ? {} : { label: options.label },
     storedAt: now,
     lastLoginAt: now,

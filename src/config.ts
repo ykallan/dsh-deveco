@@ -70,8 +70,21 @@ export const DEFAULT_REFRESH_SKEW_MINUTES = 10
 
 /** 当前生效的提前量（毫秒）。可用 `DEVECO_REFRESH_SKEW_MINUTES` 覆盖。 */
 export function refreshSkewMs(): number {
-  const minutes = envNumber('DEVECO_REFRESH_SKEW_MINUTES', DEFAULT_REFRESH_SKEW_MINUTES)
-  return Math.max(0, minutes) * 60_000
+  return refreshSkewOverrideMs() ?? DEFAULT_REFRESH_SKEW_MINUTES * 60_000
+}
+
+/**
+ * 只在用户**显式设置** `DEVECO_REFRESH_SKEW_MINUTES` 时返回该值（毫秒）。
+ *
+ * 自适应学习默认按「学到的 TTL / 3」决定提前量；显式设置则视为运维的强制覆盖，
+ * 优先级高于学习结果（这也是唯一的逃生口）。
+ */
+export function refreshSkewOverrideMs(): number | undefined {
+  const raw = process.env.DEVECO_REFRESH_SKEW_MINUTES
+  if (raw === undefined || raw.trim() === '') return undefined
+  const minutes = Number(raw)
+  if (!Number.isFinite(minutes) || minutes < 0) return undefined
+  return minutes * 60_000
 }
 
 /** 兼容旧引用：默认提前量（毫秒）。运行时请用 `refreshSkewMs()`，它读环境变量。 */

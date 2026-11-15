@@ -52,6 +52,7 @@ export interface DevecoSettingsKey {
   accountNoLabel: string
   streakDays: string
   accountAccessExpires: string
+  accountTtlLearned: string
 
   modelsEmpty: string
   modelsEmptyHint: string
@@ -160,6 +161,7 @@ export const zh: DevecoSettingsKey = {
   accountNoLabel: '未命名账号',
   streakDays: '连续 {days} 天',
   accountAccessExpires: '访问令牌 {time} 到期',
+  accountTtlLearned: '令牌寿命 ~{ttl} 分钟（{source}，{samples} 个样本）',
 
   modelsEmpty: '模型目录是空的',
   modelsEmptyHint: '登录后会自动从上游拉取模型列表；也可以点下面的「刷新模型」。',
@@ -268,6 +270,7 @@ export const en: DevecoSettingsKey = {
   accountNoLabel: 'Unnamed account',
   streakDays: '{days}-day streak',
   accountAccessExpires: 'Access token expires {time}',
+  accountTtlLearned: 'Token lifetime ~{ttl} min ({source}, {samples} sample(s))',
 
   modelsEmpty: 'The model catalog is empty',
   modelsEmptyHint: 'Signing in pulls the upstream catalog automatically; you can also press "Refresh models".',

@@ -504,6 +504,9 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
             if (authAttempts >= AUTH_RETRY_MAX) break
             authAttempts += 1
             const denied = await readErrorText(response)
+            // 先用「这张令牌被上游拒绝」的事实记一个 TTL 样本，再刷新 —— 样本来自真实行为，
+            // 而不是我们的猜测值。
+            await store.noteTokenExpired(accountId).catch(() => {})
             stats.lastAuthRetry = authAttempts
             stats.lastError = `upstream 401: ${denied}`
             logger?.warn(
@@ -534,6 +537,8 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
             pool.noteSuccess(accountId)
             // 一次成功就说明这个号本窗口没被额度卡住。
             quota.noteOk(accountId)
+            // 顺带记一个 TTL 下界样本：令牌活得比我们估的久，就把它估长一点。
+            await store.noteTokenWorked(accountId, resolved.credential.accessTokenIssuedAt).catch(() => {})
             stats.lastAccount = accountId
             stats.lastModel = wireModel
             stats.lastStatus = response.status

@@ -24,7 +24,7 @@ import type { UsageSnapshot } from './usage.ts'
 import type { ShimStats } from './shim.ts'
 import { DEVECO_PROVIDER } from './adapter.ts'
 import { credentialFromJwtToken } from './login.ts'
-import { ACCESS_TOKEN_TTL_MS, refreshSkewMs } from './config.ts'
+import { refreshSkewForTtl, TTL_FALLBACK_MS } from './ttl.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 
 export type { CheckinOutcome, CheckinSnapshot } from './checkin.ts'
@@ -122,7 +122,16 @@ export interface DevecoWebStatus {
   /** 签到到底是什么（一句话说明，卡片直接展示）。 */
   checkinNote: string
   /** 令牌策略（卡片/体检用来解释「什么时候会自动续期」）。 */
-  authPolicy: { refreshSkewMinutes: number; accessTokenTtlMinutes: number }
+  authPolicy: {
+    /** 当前生效的 accessToken 寿命（分钟），随学习变化。 */
+    accessTokenTtlMinutes: number
+    /** TTL 结论来源：learned（有被拒样本）/ extended（被抬高）/ default（默认 30 分钟）。 */
+    ttlSource: 'learned' | 'extended' | 'default'
+    /** 已积累的「被拒」样本数。 */
+    ttlSamples: number
+    /** 当前提前量（分钟）。 */
+    refreshSkewMinutes: number
+  }
   /** provider 是否已经挂到宿主 LLM 层（注册失败时为 false，体检会指出）。 */
   providerRegistered: boolean
   /** 目录最后一次成功刷新的时刻（epoch ms；0 = 从没成功过）。 */
@@ -266,6 +275,16 @@ export async function buildStatus(deps: DevecoRouteOptions): Promise<DevecoWebSt
     }
   })
   const dock = deps.dock()
+  // 学习结果按「账号里样本最多的那个」展示：多账号时每个号都会各自积累样本。
+  const learned = summaries.reduce<{ ttlMs: number; source: 'learned' | 'extended' | 'default'; samples: number }>(
+    (best, entry) => (entry.ttlSamples > best.samples
+      ? { ttlMs: entry.ttlMs, source: entry.ttlSource, samples: entry.ttlSamples }
+      : best),
+    { ttlMs: TTL_FALLBACK_MS, source: 'default', samples: 0 },
+  )
+  const authTtlMs = learned.ttlMs
+  const authTtlSource = learned.source
+  const authTtlSamples = learned.samples
   return {
     version: deps.version,
     provider: DEVECO_PROVIDER,
@@ -281,8 +300,11 @@ export async function buildStatus(deps: DevecoRouteOptions): Promise<DevecoWebSt
     shim: deps.shimStats(),
     checkinNote: deps.checkinNote,
     authPolicy: {
-      refreshSkewMinutes: Math.round(refreshSkewMs() / 60_000),
-      accessTokenTtlMinutes: Math.round(ACCESS_TOKEN_TTL_MS / 60_000),
+      // 直接反映**学习结果**：TTL 与提前量都取账号里学到的值，没有账号时退回默认。
+      accessTokenTtlMinutes: Math.round(authTtlMs / 60_000),
+      ttlSource: authTtlSource,
+      ttlSamples: authTtlSamples,
+      refreshSkewMinutes: Math.round(refreshSkewForTtl(authTtlMs) / 60_000),
     },
     providerRegistered: deps.providerRegistered(),
     catalogUpdatedAt: deps.catalogUpdatedAt(),
@@ -701,6 +723,18 @@ function doctorHandler(deps: DevecoRouteOptions): Handler {
         id: 'providers',
         ok: status.providerRegistered && status.accounts.length > 0 && status.models.length > 0,
         detail: await describeLlmDiagnostics(deps),
+      },
+      {
+        id: 'auth-ttl',
+        ok: true,
+        detail: status.authPolicy.ttlSource === 'learned'
+          ? `learned accessToken lifetime ~${status.authPolicy.accessTokenTtlMinutes} min `
+            + `from ${status.authPolicy.ttlSamples} expiry sample(s); refreshing ${status.authPolicy.refreshSkewMinutes} min early`
+          : status.authPolicy.ttlSource === 'extended'
+            ? `accessToken outlived the default; lifetime raised to ~${status.authPolicy.accessTokenTtlMinutes} min; `
+              + `refreshing ${status.authPolicy.refreshSkewMinutes} min early`
+            : `no expiry sample yet; assuming ${status.authPolicy.accessTokenTtlMinutes} min `
+              + `(refreshing ${status.authPolicy.refreshSkewMinutes} min early)`,
       },
       {
         id: 'auth-retry',

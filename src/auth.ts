@@ -20,12 +20,12 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { estimateTtlMs, MIN_REFRESH_INTERVAL_MS, MIN_REFRESH_SKEW_MS, pushTtlSample, refreshSkewForTtl } from './ttl.ts'
 import {
-  ACCESS_TOKEN_TTL_MS,
+  refreshSkewOverrideMs,
   CONTROL_TIMEOUT_MS,
   DEVECO_JWT_TOKEN_URL,
   REFRESH_COOLDOWN_MS,
-  refreshSkewMs,
 } from './config.ts'
 
 /** 手工粘贴 jwtToken 时用的账号 id（没有身份信息可推）。 */
@@ -45,8 +45,14 @@ export interface DevecoCredential {
   isRealName?: boolean
   /** 短寿命访问令牌。 */
   accessToken?: string
-  /** 访问令牌到期时刻（epoch ms）。 */
+  /** 访问令牌到期时刻（epoch ms，按学到的 TTL 推算）。 */
   accessTokenExpiresAt?: number
+  /** 当前 accessToken 的签发时刻（epoch ms）—— 学习 TTL 的基准。 */
+  accessTokenIssuedAt?: number
+  /** 学到的「签发后多久被上游拒绝」样本（毫秒，最多保留 5 个）。 */
+  ttlSamplesMs?: number[]
+  /** 观测到的「签发后仍然可用」的最大时长（TTL 下界）。 */
+  workingAgeMs?: number
   /** 上游给的刷新令牌（有就带着，目前只用于诊断）。 */
   refreshToken?: string
   /** 用户可改的备注名。 */
@@ -79,6 +85,14 @@ export interface DevecoAccountSummary {
   lastLoginAt?: number
   /** JWT 自身何时过期（epoch ms）。 */
   jwtExpiresAt?: number
+  /** 当前生效的 accessToken 寿命（毫秒，学到的或默认）。 */
+  ttlMs: number
+  /** TTL 结论来自哪里：learned（上界样本）/ extended（下界抬高）/ default。 */
+  ttlSource: 'learned' | 'extended' | 'default'
+  /** 参与计算的「被拒」样本数。 */
+  ttlSamples: number
+  /** 当前 accessToken 已经用了多久（毫秒）。 */
+  tokenAgeMs?: number
   paused: boolean
   pinned: boolean
 }
@@ -118,6 +132,17 @@ export interface DevecoRefreshResult {
   refreshToken?: string
   isRealName?: boolean
 }
+
+/**
+ * 一次续期的结果。
+ *
+ * 必须区分「上游明确拒绝」和「网络/超时这类暂时失败」：前者说明账号真的需要重新登录，
+ * 后者只是一次抖动 —— 以前两者都返回 undefined，调用方就把**网络超时也当成密钥无效**，
+ * 直接把账号写死并让 DSH 报「API 密钥无效」。这是用户遇到「请求中途突然密钥无效」的根因。
+ */
+export type DevecoRefreshOutcome =
+  | { ok: true; value: DevecoRefreshResult }
+  | { ok: false; kind: 'rejected' | 'transient'; message: string }
 
 /** 一次凭证解析的结果：够发一次聊天请求。 */
 export interface ResolvedDevecoCredential {
@@ -204,6 +229,13 @@ export function summarizeAccount(id: string, credential: DevecoCredential): Deve
   } catch {
     jwtExpiresAt = undefined
   }
+  const ttl = estimateTtlMs({
+    expiredAgesMs: credential.ttlSamplesMs,
+    workingAgeMs: credential.workingAgeMs,
+  })
+  const tokenAgeMs = credential.accessTokenIssuedAt === undefined
+    ? undefined
+    : Math.max(0, Date.now() - credential.accessTokenIssuedAt)
   return {
     id,
     ...credential.label === undefined ? {} : { label: credential.label },
@@ -212,6 +244,10 @@ export function summarizeAccount(id: string, credential: DevecoCredential): Deve
     ...credential.nationalCode === undefined ? {} : { nationalCode: credential.nationalCode },
     isRealName: credential.isRealName === true,
     usable: credential.stale !== true,
+    ttlMs: ttl.ttlMs,
+    ttlSource: ttl.source,
+    ttlSamples: ttl.samples,
+    ...tokenAgeMs === undefined ? {} : { tokenAgeMs },
     ...credential.accessTokenExpiresAt === undefined ? {} : { accessTokenExpiresAt: credential.accessTokenExpiresAt },
     ...credential.storedAt === undefined ? {} : { storedAt: credential.storedAt },
     ...credential.lastLoginAt === undefined ? {} : { lastLoginAt: credential.lastLoginAt },
@@ -262,6 +298,8 @@ class AccountSlot {
   private inflight: Promise<DevecoRefreshResult | undefined> | undefined
   private generation = 0
   private blockedUntil = 0
+  /** 上次真正打上游刷新的时刻（最小刷新间隔用）。 */
+  private lastRefreshAt = 0
   private readonly persist: (credential: DevecoCredential) => void
   private readonly log?: (message: string) => void
 
@@ -298,24 +336,52 @@ class AccountSlot {
     return expiresAt - Date.now()
   }
 
+  /** 当前生效的 accessToken 寿命（学到的或默认）。 */
+  private ttlMs(): number {
+    return estimateTtlMs({
+      expiredAgesMs: this.cred.ttlSamplesMs,
+      workingAgeMs: this.cred.workingAgeMs,
+    }).ttlMs
+  }
+
+  /**
+   * 续期提前量。
+   *
+   * 默认跟着**学到的 TTL** 走（TTL/3，夹在 2–10 分钟），所以 TTL 学得越准、刷新越少。
+   * 显式设置 `DEVECO_REFRESH_SKEW_MINUTES` 时以它为准（运维逃生口），但仍不允许超过 TTL/2，
+   * 否则就变成「刚拿到就作废」的刷新风暴。
+   */
+  private skewMs(): number {
+    const ttl = this.ttlMs()
+    const override = refreshSkewOverrideMs()
+    if (override === undefined) return refreshSkewForTtl(ttl)
+    return Math.min(override, Math.max(MIN_REFRESH_SKEW_MS, Math.floor(ttl / 2)))
+  }
+
   /**
    * 用号前检查：拿一个当前可用的访问令牌。
    *
    * 规则（这是「动态控制有效期」的落点，每次从池里取号发请求前都会走一遍）：
-   *  - 剩余寿命 > 提前量（默认 10 分钟）→ 直接用；
-   *  - 剩余 ≤ 提前量（含没有过期时间、令牌为空、已经过期）→ **先刷新再返回**；
+   *  - 剩余寿命 > 提前量 → 直接用。提前量由**学到的 TTL** 推出来（TTL/3，夹在 2–10 分钟），
+   *    所以 TTL 学得越准，刷新越少；
+   *  - 剩余 ≤ 提前量（含没有过期时间、令牌为空、已经过期）→ 先刷新再返回，但受
+   *    `MIN_REFRESH_INTERVAL_MS` 约束，同一张令牌不会被反复重刷；
    *  - 刷新被上游明确拒绝（JWT 过期 / 401）→ 标 stale，返回 undefined，让上层换号；
-   *  - 刷新因为网络抖动失败 → 只进 30s 冷却，**不判死账号**；只要旧令牌还没真过期就先用它，
-   *    真的过期了才返回 undefined。这样一次网络抖动不会把好账号写成「需重新登录」。
+   *  - 刷新因为网络抖动失败 → 只进冷却，**不判死账号**；只要旧令牌还没真过期就先用它。
    *
    * @returns 令牌；确实是「必须重新登录」时返回 undefined。
    */
   async accessToken(): Promise<string | undefined> {
     if (this.isStale()) return undefined
     const remaining = this.remainingMs()
-    if (remaining > refreshSkewMs()) return this.cred.accessToken
-    // 需要刷新：冷却期间不重复打上游。
-    if (Date.now() >= this.blockedUntil) {
+    const skew = this.skewMs()
+    if (remaining > skew) {
+      this.noteWorkingAge()
+      return this.cred.accessToken
+    }
+    // 需要刷新：冷却期与最小刷新间隔都满足才真的打上游，避免刷新风暴。
+    const now = Date.now()
+    if (now >= this.blockedUntil && now >= this.lastRefreshAt + MIN_REFRESH_INTERVAL_MS) {
       this.inflight ??= this.refresh().finally(() => {
         this.inflight = undefined
       })
@@ -325,9 +391,63 @@ class AccountSlot {
     if (this.isStale()) return undefined
     // 刷新失败/冷却中：旧令牌还没真过期就继续用（让上游去判），真过期了才算不可用。
     if (remaining > 0 && typeof this.cred.accessToken === 'string' && this.cred.accessToken !== '') {
+      this.noteWorkingAge()
       return this.cred.accessToken
     }
     return undefined
+  }
+
+  /**
+   * 记录「这张令牌已经活了这么久且仍可用」—— TTL 的下界。
+   *
+   * 只在明显超过当前假设时才落盘，避免每条请求都写文件。
+   */
+  private noteWorkingAge(): void {
+    const issuedAt = this.cred.accessTokenIssuedAt
+    if (issuedAt === undefined) return
+    const age = Date.now() - issuedAt
+    const known = this.cred.workingAgeMs ?? 0
+    if (age <= known || age <= this.ttlMs()) return
+    this.cred = { ...this.cred, workingAgeMs: age }
+    this.persist(this.cred)
+  }
+
+  /**
+   * 上游**接受**了这张令牌 —— TTL 的下界样本。
+   *
+   * 判据是「实际年龄超过当前估值却还能用」，说明我们估小了。由 shim 在请求成功后调用，
+   * 传进来的 `issuedAt` 是**这次请求实际使用的那张令牌**的签发时刻（不是当前 slot 里的，
+   * 因为期间可能已经刷新过）。
+   */
+  noteTokenWorked(issuedAt?: number): void {
+    const issued = issuedAt ?? this.cred.accessTokenIssuedAt
+    if (issued === undefined) return
+    const age = Date.now() - issued
+    if (age <= 0 || age <= (this.cred.workingAgeMs ?? 0) || age <= this.ttlMs()) return
+    this.cred = { ...this.cred, workingAgeMs: age }
+    this.persist(this.cred)
+    this.log?.('token outlived the TTL estimate; raising it to '
+      + `${Math.round(this.ttlMs() / 60_000)}min`)
+  }
+
+  /**
+   * 上游拿这张令牌回了 401 —— 这是 TTL 的**上界样本**。
+   *
+   * 只在「令牌是本地签发的、且没有被别的路径替换过」时采信：如果签发时刻缺失或为负，
+   * 说明这是从磁盘读来的旧令牌，年龄不可信，宁可不要这个样本。
+   */
+  recordExpiredToken(): void {
+    const issuedAt = this.cred.accessTokenIssuedAt
+    if (issuedAt === undefined) return
+    const age = Date.now() - issuedAt
+    if (age <= 0) return
+    const samples = pushTtlSample(this.cred.ttlSamplesMs, age)
+    if (samples.length === (this.cred.ttlSamplesMs ?? []).length) return
+    this.cred = { ...this.cred, ttlSamplesMs: samples }
+    this.persist(this.cred)
+    const ttl = this.ttlMs()
+    this.log?.(`learned a token lifetime sample: ${Math.round(age / 60_000)}min `
+      + `(ttl now ~${Math.round(ttl / 60_000)}min from ${samples.length} sample(s))`)
   }
 
   /** 强制续期一次（用户点「刷新凭证」/聊天 401 后重试）。 */
@@ -353,29 +473,37 @@ class AccountSlot {
       this.markStale('jwtToken expired; sign in again')
       return undefined
     }
+    this.lastRefreshAt = Date.now()
     const outcome = await requestTokenRefresh(seen)
-    if (outcome === undefined) {
+    if (!outcome.ok) {
       // 代际变了说明期间有人重新登录过，这次失败不该盖掉新凭证。
       if (generation === this.generation) {
         this.blockedUntil = Date.now() + REFRESH_COOLDOWN_MS
-        this.log?.('refresh failed (kept the account usable; will retry after cooldown)')
+        this.log?.(`refresh ${outcome.kind}: ${outcome.message}`)
+        // **只有上游明确拒绝**才是真的需要重新登录；网络/超时只是抖动，绝不能写死账号。
+        if (outcome.kind === 'rejected' && force && generation === this.generation) {
+          this.markStale(`refresh rejected by upstream: ${outcome.message}`)
+        }
       }
-      if (force && generation === this.generation) this.markStale('refresh rejected by upstream; sign in again')
       return undefined
     }
+    const value = outcome.value
+    const issuedAt = Date.now()
     const next: DevecoCredential = withJwtIdentity({
       ...this.cred,
-      accessToken: outcome.accessToken,
-      accessTokenExpiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
-      ...outcome.refreshToken === undefined ? {} : { refreshToken: outcome.refreshToken },
-      ...outcome.isRealName === undefined ? {} : { isRealName: outcome.isRealName },
+      accessToken: value.accessToken,
+      // 用**学到的 TTL** 算过期时刻，不再写死 30 分钟；同时记下签发时刻供后续学习。
+      accessTokenIssuedAt: issuedAt,
+      accessTokenExpiresAt: issuedAt + this.ttlMs(),
+      ...value.refreshToken === undefined ? {} : { refreshToken: value.refreshToken },
+      ...value.isRealName === undefined ? {} : { isRealName: value.isRealName },
       stale: false,
     })
     this.cred = next
     this.generation += 1
     this.blockedUntil = 0
     this.persist(next)
-    return outcome
+    return value
   }
 
   private markStale(reason: string): void {
@@ -398,12 +526,13 @@ class AccountSlot {
  * 上游用**同一个 GET** 同时承担「校验 JWT」和「换 accessToken」，区别只有 `refresh` 头。
  * 请求没有 body，JWT 放在 `jwtToken` 头里（注意是小写开头的驼峰，不是 `Authorization`）。
  *
- * @returns 成功时的新令牌；被拒/网络失败返回 undefined（不抛）。
+ * @returns 明确的成功/拒绝/暂时失败三态。**网络失败与上游拒绝必须分开**，否则一次超时
+ *          就会被上层当作「密钥无效」，把还能用的账号写死。
  */
 export async function requestTokenRefresh(
   jwtToken: string,
   signal?: AbortSignal,
-): Promise<DevecoRefreshResult | undefined> {
+): Promise<DevecoRefreshOutcome> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), CONTROL_TIMEOUT_MS)
   timer.unref?.()
@@ -414,19 +543,38 @@ export async function requestTokenRefresh(
       headers: { refresh: 'true', jwtToken, 'accept-language': 'zh-CN' },
       signal: controller.signal,
     })
-    if (!response.ok) return undefined
-    const body = await response.json() as DevecoTokenCheckResponse
+    if (response.status === 401 || response.status === 403) {
+      return { ok: false, kind: 'rejected', message: `HTTP ${response.status}` }
+    }
+    if (!response.ok) {
+      // 5xx / 429 是上游暂时不可用，不是凭证问题。
+      return { ok: false, kind: 'transient', message: `HTTP ${response.status}` }
+    }
+    const body = await response.json() as DevecoTokenCheckResponse & { errorCode?: unknown; errorMsg?: unknown }
     const accessToken = body.userInfo?.accessToken
-    if (body.status !== true || typeof accessToken !== 'string' || accessToken === '') return undefined
-    const result: DevecoRefreshResult = { accessToken }
+    if (body.status !== true || typeof accessToken !== 'string' || accessToken === '') {
+      const errorCode = typeof body.errorCode === 'number' ? body.errorCode : undefined
+      const errorMsg = typeof body.errorMsg === 'string' && body.errorMsg !== '' ? body.errorMsg : undefined
+      // 4016 / 明确的 invalid token 才是真拒绝；其它未知形态按暂时失败处理，宁可重试也不写死账号。
+      const text = [errorMsg, errorCode === undefined ? undefined : `errorCode ${errorCode}`]
+        .filter((part): part is string => part !== undefined).join(' ') || 'refresh returned status=false'
+      const rejected = errorCode === 4016 || /invalid|expired|unauthor|forbidden/i.test(text)
+      return { ok: false, kind: rejected ? 'rejected' : 'transient', message: text }
+    }
+    const value: DevecoRefreshResult = { accessToken }
     if (typeof body.userInfo?.refreshToken === 'string' && body.userInfo.refreshToken !== '') {
-      result.refreshToken = body.userInfo.refreshToken
+      value.refreshToken = body.userInfo.refreshToken
     }
     const realName = parseRealName(body.userInfo?.realName)
-    if (realName !== undefined) result.isRealName = realName
-    return result
-  } catch {
-    return undefined
+    if (realName !== undefined) value.isRealName = realName
+    return { ok: true, value }
+  } catch (error: unknown) {
+    // 超时 / DNS / 连接重置：一律算暂时失败。
+    return {
+      ok: false,
+      kind: 'transient',
+      message: error instanceof Error ? error.message : String(error),
+    }
   } finally {
     clearTimeout(timer)
   }
@@ -698,6 +846,25 @@ export class DevecoAccountStore {
     const credential = this.doc.accounts[id]
     if (credential === undefined) return
     this.slot(id, credential).noteRejected(reason)
+  }
+
+  /**
+   * 上游拿这张 accessToken 回了 401 —— 交给 slot 记一个 TTL 上界样本。
+   *
+   * 只采样、不改账号状态：是否判死由调用方根据「刷新能否成功」决定。
+   */
+  async noteTokenWorked(id: string, issuedAt?: number): Promise<void> {
+    await this.ensureLoaded()
+    const credential = this.doc.accounts[id]
+    if (credential === undefined) return
+    this.slot(id, credential).noteTokenWorked(issuedAt)
+  }
+
+  async noteTokenExpired(id: string): Promise<void> {
+    await this.ensureLoaded()
+    const credential = this.doc.accounts[id]
+    if (credential === undefined) return
+    this.slot(id, credential).recordExpiredToken()
   }
 
   /** 从磁盘重读（另一个进程/用户手工改了文档时）。 */

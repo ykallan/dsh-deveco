@@ -207,15 +207,32 @@ describe('DevecoAccountStore', () => {
 
   it('marks an account stale when the refresh is rejected', async () => {
     const original = globalThis.fetch
-    globalThis.fetch = (async () => new Response(JSON.stringify({ status: false }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })) as typeof fetch
+    globalThis.fetch = (async () => new Response(JSON.stringify({
+      status: false,
+      errorCode: 4016,
+      errorMsg: 'invalid accessToken.',
+    }), { status: 200, headers: { 'content-type': 'application/json' } })) as typeof fetch
     try {
       const store = tempStore()
       await store.upsert(credential({ accessTokenExpiresAt: Date.now() - 1000 }))
       expect(await store.forceRefresh('u-1')).toBe(false)
       expect((await store.list())[0]?.usable).toBe(false)
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+
+  it('does not mark an account stale when the refresh fails on the network', async () => {
+    const original = globalThis.fetch
+    globalThis.fetch = (async () => {
+      throw new Error('ECONNRESET')
+    }) as typeof fetch
+    try {
+      const store = tempStore()
+      await store.upsert(credential({ accessTokenExpiresAt: Date.now() - 1000 }))
+      expect(await store.forceRefresh('u-1')).toBe(false)
+      // 网络失败 ≠ 密钥无效：账号必须仍然是「可用」的，否则一次抖动就会让用户被迫重登。
+      expect((await store.list())[0]?.usable).toBe(true)
     } finally {
       globalThis.fetch = original
     }
@@ -349,6 +366,98 @@ describe('pre-use refresh policy (freshness gate)', () => {
     } finally {
       globalThis.fetch = original
     }
+  })
+})
+
+describe('adaptive TTL learning', () => {
+  const original = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = original
+  })
+
+  function stubRefresh(accessToken = 'fresh'): () => number {
+    let calls = 0
+    globalThis.fetch = (async () => {
+      calls += 1
+      return new Response(JSON.stringify({
+        status: true,
+        userInfo: { accessToken, refreshToken: 'r', nationalCode: 'CN', realName: true },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    return () => calls
+  }
+
+  it('records a lifetime sample from a 401 and starts learning', async () => {
+    const store = tempStore()
+    // 令牌签发于 20 分钟前，现在被上游拒绝 → 样本 20 分钟。
+    await store.upsert(credential({
+      accessToken: 'old',
+      accessTokenIssuedAt: Date.now() - 20 * 60_000,
+      accessTokenExpiresAt: Date.now() + 10 * 60_000,
+    }))
+    await store.noteTokenExpired('u-1')
+    const summary = (await store.list())[0]
+    expect(summary?.ttlSamples).toBe(1)
+    // 一个样本还不够，先沿用默认值。
+    expect(summary?.ttlSource).toBe('default')
+
+    await store.noteTokenExpired('u-1')
+    await store.noteTokenExpired('u-1')
+    const learned = (await store.list())[0]
+    expect(learned?.ttlSource).toBe('learned')
+    expect(learned?.ttlMs).toBeGreaterThanOrEqual(20 * 60_000 - 1000)
+    expect(learned?.ttlMs).toBeLessThanOrEqual(20 * 60_000 + 1000)
+  })
+
+  it('persists learned samples across reload', async () => {
+    const store = tempStore()
+    await store.upsert(credential({
+      accessTokenIssuedAt: Date.now() - 18 * 60_000,
+      accessTokenExpiresAt: Date.now() + 12 * 60_000,
+    }))
+    await store.noteTokenExpired('u-1')
+    await store.noteTokenExpired('u-1')
+    const reopened = new DevecoAccountStore(store.documentPath)
+    const summary = (await reopened.list())[0]
+    expect(summary?.ttlSamples).toBe(2)
+    expect(summary?.ttlSource).toBe('learned')
+  })
+
+  it('ignores a 401 for a token with no issue time (unknown age)', async () => {
+    const store = tempStore()
+    const { accessTokenIssuedAt: _dropped, ...rest } = credential()
+    await store.upsert(rest)
+    await store.noteTokenExpired('u-1')
+    expect((await store.list())[0]?.ttlSamples).toBe(0)
+  })
+
+  it('does not refresh more often than the minimum interval', async () => {
+    const calls = stubRefresh('fresh')
+    const store = tempStore()
+    await store.upsert(credential({ accessTokenExpiresAt: Date.now() - 1000 }))
+    const first = await store.resolve('u-1')
+    expect(first?.accessToken).toBe('fresh')
+    expect(calls()).toBe(1)
+
+    // 立刻把令牌再标成「已过期」，第二次取号不应再次打上游（最小刷新间隔 60s）。
+    await store.upsert(credential({ accessToken: 'fresh', accessTokenExpiresAt: Date.now() - 1000 }))
+    await store.resolve('u-1')
+    expect(calls()).toBe(1)
+  })
+
+  it('learns a longer lifetime when the upstream accepts an old token', async () => {
+    const store = tempStore()
+    // 签发于 45 分钟前、上游照样接受 → 下界样本，TTL 应抬到默认 30 分钟之上。
+    await store.upsert(credential({
+      accessToken: 'still-good',
+      accessTokenIssuedAt: Date.now() - 45 * 60_000,
+      accessTokenExpiresAt: Date.now() - 60_000,
+    }))
+    await store.noteTokenWorked('u-1')
+    const summary = (await store.list())[0]
+    expect(summary?.ttlSource).toBe('extended')
+    expect(summary?.ttlMs).toBeGreaterThan(30 * 60_000)
   })
 })
 
