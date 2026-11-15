@@ -84,6 +84,13 @@ export interface DevecoShimOptions {
   quota: DevecoQuotaTracker
   /** 用户勾选的模型（空 = 全给）。 */
   enabledModels?: () => readonly string[] | undefined
+  /**
+   * 某个账号的空闲槽位归零时的回调。
+   *
+   * 用途：后台续期本该给这个号换令牌、但当时它有请求在飞，于是挂成待办；请求一结束就靠这个
+   * 回调立刻补刷一次，而不是等下一轮巡检（最坏 5 分钟）。
+   */
+  onAccountIdle?: (id: string) => void
   logger?: { debug: (message: string) => void; warn: (message: string, ...rest: unknown[]) => void }
 }
 
@@ -595,6 +602,14 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
           if (classified.retryable !== true && classified.needsLogin !== true) break
         } finally {
           pool.release(accountId)
+          // 槽位归零 → 通知外层把「挂起的续期」补上（不阻塞当前请求）。
+          if ((pool.get(accountId)?.activeConcurrent ?? 0) === 0) {
+            try {
+              options.onAccountIdle?.(accountId)
+            } catch (error: unknown) {
+              logger?.debug(`dsh-deveco: onAccountIdle failed: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          }
         }
       }
       const error = lastError ?? {

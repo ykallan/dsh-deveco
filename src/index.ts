@@ -176,6 +176,9 @@ export function apply(ctx: Context, rawConfig: Config): void {
     }
   }
 
+  /** 插件是否已停用（收摊后所有定时器/回调都不再干活）。 */
+  let stopped = false
+
   const store = new DevecoAccountStore(devecoAccountsPath(), { log: appendRefreshLog })
   const pool = new DevecoAccountPool([], { maxConcurrent: config.maxConcurrent ?? 1 })
   const catalog = new DevecoCatalog()
@@ -295,6 +298,32 @@ export function apply(ctx: Context, rawConfig: Config): void {
   }
 
   /**
+   * 「本该续期、但当时有请求在飞」的账号。
+   *
+   * 以前这种号直接跳过，等下一轮巡检（最坏 5 分钟，长回合可能跨过好几次）。现在改成
+   * **挂起待办**：请求一结束（`onAccountIdle`）就立刻补刷一次 —— 既不会换掉在飞请求正在用的
+   * 令牌，也不用让任何人等待。定义在 shim 之前，是因为构建 shim 时要把回调传进去。
+   */
+  const pendingRefresh = new Set<string>()
+
+  /** 补刷单个账号（尽力而为，失败留给下一轮巡检 / 401 路径）。 */
+  const flushPendingRefresh = (id: string): void => {
+    if (stopped || !pendingRefresh.has(id)) return
+    if ((pool.get(id)?.activeConcurrent ?? 0) > 0) return
+    pendingRefresh.delete(id)
+    void store.forceRefresh(id).then(ok => {
+      ctx.logger.debug(ok
+        ? `dsh-deveco: refreshed the deferred credential for ${id}`
+        : `dsh-deveco: deferred refresh for ${id} did not succeed; next sweep will retry`)
+    }).catch(() => {})
+  }
+
+  /** 请求结束时回调：账号空了就把挂起的续期补上。 */
+  const onAccountIdle = (id: string): void => {
+    flushPendingRefresh(id)
+  }
+
+  /**
    * 「刷新额度」：重新探测每个账号现在还能不能用。
    *
    * **它不是查余额** —— 上游没有余额接口（`docs/PROTOCOL.md` 第 6 节）。它能做的就是
@@ -378,10 +407,10 @@ export function apply(ctx: Context, rawConfig: Config): void {
     usage,
     quota,
     enabledModels: () => current().enabledModels,
+    onAccountIdle,
     logger: ctx.logger,
   })
 
-  let stopped = false
 
   // ---- 路由 ----------------------------------------------------------------
   ctx.inject(['webServer'], webCtx => {
@@ -504,11 +533,16 @@ export function apply(ctx: Context, rawConfig: Config): void {
    */
   const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000
   let keepAliveTimer: ReturnType<typeof setTimeout> | undefined
+
   const keepAliveLoop = async (): Promise<void> => {
     if (stopped) return
     try {
-      // 有请求在飞的账号不许后台续期：换新令牌会让在飞的流当场被判「密钥无效」。
+      // 有请求在飞的账号这一轮不刷，但记下来，等它空下来立刻补刷。
+      const busy = pool.list().filter(entry => entry.activeConcurrent > 0).map(entry => entry.id)
+      for (const id of busy) pendingRefresh.add(id)
       const outcome = await store.keepAlive({ skip: id => (pool.get(id)?.activeConcurrent ?? 0) > 0 })
+      // 这一轮检查过且不再忙的，待办可以清掉（已经是最新的了）。
+      for (const id of [...pendingRefresh]) if (!busy.includes(id)) pendingRefresh.delete(id)
       if (outcome.refreshed > 0) ctx.logger.debug(`dsh-deveco: refreshed ${outcome.refreshed} access token(s)`)
       if (outcome.needsLogin.length > 0) {
         ctx.logger.debug(`dsh-deveco: ${outcome.needsLogin.length} account(s) need a fresh sign-in`)

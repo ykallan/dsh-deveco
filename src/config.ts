@@ -93,6 +93,14 @@ export const REFRESH_SKEW_MS = DEFAULT_REFRESH_SKEW_MINUTES * 60_000
 /** 续期失败后的冷却，避免每个请求都去打上游。 */
 export const REFRESH_COOLDOWN_MS = 30_000
 
+/**
+ * 令牌**真的过期**、且有刷新正在进行时，请求最多等多久。
+ *
+ * 只在这种情况下等待：旧令牌还能用就绝不等待（那只会平白增加延迟）。上限取 10 秒，
+ * 因为最坏路径是「401 恢复：5 秒等待 + 刷新」，不能让后续请求被拖到 DSH 侧超时。
+ */
+export const AUTH_WAIT_FOR_REFRESH_MS = 10_000
+
 /** 控制面请求用的浏览器 UA（上游按 UA 判客户端）。 */
 export const BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
   + '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'

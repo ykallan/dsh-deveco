@@ -43,7 +43,7 @@ interface Harness {
   close: () => Promise<void>
 }
 
-async function buildShim(credential: DevecoCredential): Promise<Harness> {
+async function buildShim(credential: DevecoCredential, options: { onAccountIdle?: (id: string) => void } = {}): Promise<Harness> {
   const dir = tempDir()
   const store = new DevecoAccountStore(join(dir, 'accounts.json'))
   await store.upsert(credential)
@@ -66,6 +66,7 @@ async function buildShim(credential: DevecoCredential): Promise<Harness> {
     catalog,
     usage: new DevecoUsageTracker({ path: join(dir, 'usage.json') }),
     quota: new DevecoQuotaTracker(),
+    ...options.onAccountIdle === undefined ? {} : { onAccountIdle: options.onAccountIdle },
   })
   await shim.ready
   return { baseUrl: shim.baseUrl(), token: shim.token(), store, pool, close: () => shim.close() }
@@ -183,6 +184,39 @@ describe('shim 401 handling', () => {
       expect(result.text).toMatch(/rejected the token 5 times|sign in again/i)
       // 5 次都失败 → 这个号确实要重新登录。
       expect((await harness.store.list())[0]?.usable).toBe(false)
+    } finally {
+      await harness.close()
+    }
+  })
+
+  it('reports the account as idle when the last in-flight request ends (deferred-refresh hook)', async () => {
+    const idle: string[] = []
+    const harness = await buildShim(credential(), { onAccountIdle: id => idle.push(id) })
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (isLoopback(url)) return realFetch(input as never)
+      // 每轮结束的 exitSessionQueue 要成功返回，否则它会重试约 400ms，把槽位释放拖后。
+      if (url.includes('/exitSessionQueue')) {
+        return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url.includes('/chat/completions')) {
+        return new Response(SSE_BODY, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected upstream call: ${url}`)
+    }) as typeof fetch
+
+    try {
+      const result = await chat(harness, {
+        model: 'GLM-5.1-DevEco',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      })
+      expect(result.status).toBe(200)
+      // 槽位释放发生在响应写完之后的 finally 里，等一个宏任务再断言。
+      await new Promise<void>(resolve => setTimeout(resolve, 20))
+      // 请求结束、槽位归零 → 外层据此立刻补刷挂起的续期。
+      expect(idle).toEqual(['u-1'])
+      expect(harness.pool.get('u-1')?.activeConcurrent).toBe(0)
     } finally {
       await harness.close()
     }

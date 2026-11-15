@@ -20,12 +20,13 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { estimateTtlMs, MIN_REFRESH_INTERVAL_MS, MIN_REFRESH_SKEW_MS, pushTtlSample, refreshSkewForTtl } from './ttl.ts'
+import { estimateTtlMs, MIN_REFRESH_SKEW_MS, pushTtlSample, refreshSkewForTtl, shouldRefresh } from './ttl.ts'
 import {
   refreshSkewOverrideMs,
   CONTROL_TIMEOUT_MS,
   DEVECO_JWT_TOKEN_URL,
   REFRESH_COOLDOWN_MS,
+  AUTH_WAIT_FOR_REFRESH_MS,
 } from './config.ts'
 
 /** 手工粘贴 jwtToken 时用的账号 id（没有身份信息可推）。 */
@@ -379,9 +380,13 @@ class AccountSlot {
       this.noteWorkingAge()
       return this.cred.accessToken
     }
-    // 需要刷新：冷却期与最小刷新间隔都满足才真的打上游，避免刷新风暴。
     const now = Date.now()
-    if (now >= this.blockedUntil && now >= this.lastRefreshAt + MIN_REFRESH_INTERVAL_MS) {
+    const sinceLastRefresh = this.lastRefreshAt === 0
+      ? Number.POSITIVE_INFINITY
+      : now - this.lastRefreshAt
+    // 主动刷新的闸门：每账号 5 分钟最多 1 次；紧急/短 TTL 会自动放行（见 shouldRefresh）。
+    const gate = shouldRefresh({ sinceLastRefreshMs: sinceLastRefresh, ttlMs: this.ttlMs(), remainingMs: remaining })
+    if (now >= this.blockedUntil && gate.allowed) {
       this.inflight ??= this.refresh().finally(() => {
         this.inflight = undefined
       })
@@ -389,12 +394,34 @@ class AccountSlot {
       if (outcome !== undefined) return outcome.accessToken
     }
     if (this.isStale()) return undefined
-    // 刷新失败/冷却中：旧令牌还没真过期就继续用（让上游去判），真过期了才算不可用。
+    // 刷新失败/冷却/被闸门挡住：旧令牌还没真过期就继续用（让上游去判），真过期了才算不可用。
+    //
+    // 「有旧令牌就不等」是刻意设计：刷新的触发点是「剩余 < 提前量」，此时旧令牌通常还有几分钟
+    // 寿命，让它继续跑比让请求排队等待更快，也不会失败。
     if (remaining > 0 && typeof this.cred.accessToken === 'string' && this.cred.accessToken !== '') {
       this.noteWorkingAge()
       return this.cred.accessToken
     }
+    // 真过期了才短等一次正在进行的刷新（有上限，避免把请求拖死）。
+    if (this.inflight !== undefined) {
+      const settled = await this.waitForInflight(AUTH_WAIT_FOR_REFRESH_MS)
+      if (settled !== undefined) return settled
+    }
     return undefined
+  }
+
+  /** 等一个正在进行的刷新，最多 `maxMs`；超时返回 undefined。 */
+  private async waitForInflight(maxMs: number): Promise<string | undefined> {
+    const inflight = this.inflight
+    if (inflight === undefined) return undefined
+    const result = await Promise.race([
+      inflight,
+      new Promise<undefined>(resolve => {
+        const timer = setTimeout(() => resolve(undefined), maxMs)
+        timer.unref?.()
+      }),
+    ])
+    return result?.accessToken
   }
 
   /**

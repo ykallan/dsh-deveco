@@ -432,7 +432,7 @@ describe('adaptive TTL learning', () => {
     expect((await store.list())[0]?.ttlSamples).toBe(0)
   })
 
-  it('does not refresh more often than the minimum interval', async () => {
+  it('throttles a second refresh inside the five-minute window while the token is comfortable', async () => {
     const calls = stubRefresh('fresh')
     const store = tempStore()
     await store.upsert(credential({ accessTokenExpiresAt: Date.now() - 1000 }))
@@ -440,10 +440,25 @@ describe('adaptive TTL learning', () => {
     expect(first?.accessToken).toBe('fresh')
     expect(calls()).toBe(1)
 
-    // 立刻把令牌再标成「已过期」，第二次取号不应再次打上游（最小刷新间隔 60s）。
-    await store.upsert(credential({ accessToken: 'fresh', accessTokenExpiresAt: Date.now() - 1000 }))
+    // 令牌还剩 5 分钟（不紧急），刚刷新过 0 秒 → 闸门应挡住第二次刷新，直接用现有令牌。
+    await store.upsert(credential({ accessToken: 'fresh', accessTokenExpiresAt: Date.now() + 5 * 60_000 }))
+    const second = await store.resolve('u-1')
+    expect(second?.accessToken).toBe('fresh')
+    expect(calls()).toBe(1)
+  })
+
+  it('lets an urgent token through even inside the window', async () => {
+    const calls = stubRefresh('fresh')
+    const store = tempStore()
+    await store.upsert(credential({ accessTokenExpiresAt: Date.now() - 1000 }))
     await store.resolve('u-1')
     expect(calls()).toBe(1)
+
+    // 只剩 30 秒 → 紧急放行，即使距上次刷新不到 5 分钟。
+    await store.upsert(credential({ accessToken: 'old', accessTokenExpiresAt: Date.now() + 30_000 }))
+    const second = await store.resolve('u-1')
+    expect(calls()).toBe(2)
+    expect(second?.accessToken).toBe('fresh')
   })
 
   it('learns a longer lifetime when the upstream accepts an old token', async () => {

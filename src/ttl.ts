@@ -25,6 +25,44 @@ export const TTL_SAMPLE_KEEP = 5
 export const TTL_MIN_SAMPLES = 2
 /** 同一账号两次刷新之间的最小间隔，避免「刷新风暴」。 */
 export const MIN_REFRESH_INTERVAL_MS = 60 * 1000
+/**
+ * 每账号「主动刷新」的最小间隔（用户要求：5 分钟内最多 1 次）。
+ *
+ * 只约束**主动/后台**刷新。401 恢复、以及下面两种紧急情况会绕过它。
+ */
+export const AUTO_REFRESH_INTERVAL_MS = 5 * 60 * 1000
+/** 剩余寿命低于这个值属于「紧急」，闸门必须放行。 */
+export const URGENT_REMAINING_MS = 60 * 1000
+
+/**
+ * 闸门会不会挡住一次「到点了」的刷新。
+ *
+ * 关键算式：刷新发生在「令牌年龄 = TTL − 提前量 = 2/3·TTL」时。若 `2/3·TTL` 小于闸门间隔，
+ * 闸门就会把该刷的请求挡到过期之后 —— 这就是必须按 TTL 退化的原因。
+ *
+ * @param sinceLastRefreshMs 距上次刷新的毫秒数
+ * @param ttlMs 学到的（或默认的）令牌寿命
+ * @param remainingMs 当前令牌剩余寿命
+ * @param autoIntervalMs 主动刷新闸门（默认 5 分钟）
+ * @param urgentRemainingMs 紧急阈值（默认 60 秒）
+ * @returns true = 允许刷新
+ */
+export function shouldRefresh(input: {
+  sinceLastRefreshMs: number
+  ttlMs: number
+  remainingMs: number
+  autoIntervalMs?: number
+  urgentRemainingMs?: number
+}): { allowed: boolean; reason: 'interval-ok' | 'urgent' | 'short-ttl' | 'throttled' } {
+  const auto = input.autoIntervalMs ?? AUTO_REFRESH_INTERVAL_MS
+  const urgent = input.urgentRemainingMs ?? URGENT_REMAINING_MS
+  if (input.sinceLastRefreshMs >= auto) return { allowed: true, reason: 'interval-ok' }
+  // 紧急：快没命了就别管节流。
+  if (input.remainingMs <= urgent) return { allowed: true, reason: 'urgent' }
+  // 令牌寿命本来就比闸门短：闸门会把它挡到过期之后，必须退化。
+  if (Math.round((input.ttlMs * 2) / 3) < auto) return { allowed: true, reason: 'short-ttl' }
+  return { allowed: false, reason: 'throttled' }
+}
 /** 提前量上限（沿用原来的 10 分钟）。 */
 export const MAX_REFRESH_SKEW_MS = 10 * 60 * 1000
 /** 提前量下限：太小的提前量等于没有。 */
