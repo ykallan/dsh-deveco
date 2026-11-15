@@ -617,6 +617,12 @@ function dockHandler(deps: DevecoRouteOptions): Handler {
   }
 }
 
+/** 目录里模型声明过的最大输出上限（体检展示用）。 */
+function maxOutputOf(status: DevecoWebStatus): string {
+  const values = status.models.map(model => model.maxTokens ?? 0).filter(value => value > 0)
+  return values.length === 0 ? 'unknown' : String(Math.max(...values))
+}
+
 /**
  * 把「宿主 LLM 层实际看到了什么」写成一句人话。
  *
@@ -671,6 +677,14 @@ function doctorHandler(deps: DevecoRouteOptions): Handler {
         detail: status.models.length === 0 ? 'model catalog is empty' : `${status.models.length} model(s)`,
       },
       { id: 'shim', ok: shim.port > 0, detail: shim.port > 0 ? `loopback shim on port ${shim.port}` : 'shim is not listening' },
+      {
+        id: 'output-ceiling',
+        ok: (shim.lastMaxTokens ?? 0) !== 0 && (shim.lastMaxTokens ?? Number.MAX_SAFE_INTEGER) >= 8_192,
+        detail: shim.lastMaxTokens === undefined
+          ? `no chat request yet; models advertise up to ${maxOutputOf(status)} output tokens`
+          : `last request sent max_tokens=${shim.lastMaxTokens}`
+            + ` (context is independent; models advertise up to ${maxOutputOf(status)})`,
+      },
       {
         id: 'provider',
         ok: status.providerRegistered,

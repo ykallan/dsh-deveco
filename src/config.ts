@@ -76,9 +76,33 @@ export const DEVECO_CLIENT_TAG = `deveco-code@${DEVECO_VERSION}`
 export const DEVECO_GLM_CONTEXT_LIMIT = 170_000
 export const DEVECO_GLM_OUTPUT_LIMIT = 32_000
 
-/** 未声明上限时的兜底。 */
+/** 未声明上限时的兜底（上下文窗口）。 */
 export const DEFAULT_CONTEXT_WINDOW = 32_768
+/** 兜底的单次输出上限：只给「确实知道上限」的模型用（如视觉模型 8K）。 */
 export const DEFAULT_MAX_TOKENS = 8_192
+
+/**
+ * 渠道级输出上限。
+ *
+ * 这是**输出**（max_tokens）的上限，和上下文窗口无关 —— 1M 上下文的模型也照样只能
+ * 一次输出这么多。上游对 GLM 明确声明 32K；其余模型没有单独声明时按同一个上限处理。
+ *
+ * 为什么要有一个统一上限：pi-ai 在请求没带 `max_tokens` 时，直接拿模型描述里的
+ * `maxTokens` 当上限（见 `openai-completions.js` 的 `ceiling`）。如果这里给了一个
+ * 保守的小值（以前是 8192），长回答会在 8K 处被截断，而推理内容与正文**共享**这个
+ * 额度 —— 表现就是「推理到一半提示输出 token 上限」。
+ */
+export const DEVECO_OUTPUT_CEILING = 32_000
+
+/**
+ * 当前生效的输出上限。
+ *
+ * 可用 `DEVECO_MAX_OUTPUT_TOKENS` 覆盖：上游若是放宽了单次输出，不必改代码。
+ * 注意这个值只能**调低/对齐**渠道；设得比渠道实际允许的更大，上游会直接 400。
+ */
+export function outputCeiling(): number {
+  return envNumber('DEVECO_MAX_OUTPUT_TOKENS', DEVECO_OUTPUT_CEILING)
+}
 
 /**
  * 隐藏模型：不在模型目录里，但确实能调。用户手工写进 `enabledModels`
@@ -120,10 +144,18 @@ export function channelLimitsFor(id: string): { context: number; output: number 
   return DEVECO_MODEL_LIMITS[wire]
 }
 
-/** 渠道声明上限表（按上游 wire id）。 */
+/**
+ * 渠道声明上限表（按上游 wire id）。
+ *
+ * `output` 是**单次输出**上限，`context` 是上下文窗口。上游对 GLM 系声明
+ * 170000/32000；deepseek 系未单独声明输出，按 `DEVECO_OUTPUT_CEILING` 处理。
+ */
 export const DEVECO_MODEL_LIMITS: Record<string, { context: number; output: number }> = {
   'GLM-5.1': { context: DEVECO_GLM_CONTEXT_LIMIT, output: DEVECO_GLM_OUTPUT_LIMIT },
   'GLM-5.3': { context: DEVECO_GLM_CONTEXT_LIMIT, output: DEVECO_GLM_OUTPUT_LIMIT },
+  'GLM-5.2': { context: 202_752, output: DEVECO_OUTPUT_CEILING },
+  'deepseek-v4.1-flash-1017': { context: 1_048_576, output: DEVECO_OUTPUT_CEILING },
+  'deepseek-v4-flash': { context: 1_044_480, output: DEVECO_OUTPUT_CEILING },
 }
 
 /** 队列/并发默认值。上游同时只允许 1 个生成，超出的排队。 */

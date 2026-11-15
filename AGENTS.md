@@ -74,6 +74,10 @@ src/client/*       浏览器侧：卡片、底部状态行、侧边栏页
   `content-type: application/json`。
 - **令牌不进浏览器**：状态文档里只允许账号名、时间戳、状态。
 - **新增 CSS 类名先 `pnpm build`（生成 `.module.css.d.ts`）再 typecheck**。
+- **模型描述里的 `maxTokens` 是「单次输出上限」，不是上下文窗口**。pi-ai 在请求没带
+  `max_tokens` 时直接拿它当天花板，而推理与正文共享这个额度 —— 给它一个保守小值（曾经是
+  8192）会让 1M 上下文的模型在推理中途被截断。上游没给 `output` 时用
+  `DEVECO_OUTPUT_CEILING`（32K），不要退回小数字。
 - **签到不要变成「领积分」**：上游没有这个接口（`docs/PROTOCOL.md` 第 6 节）。它是每日体检。
 - 续期必须单飞并带代际：`refreshToken` 一次性，并发刷新会把账号写成 stale。
 - 每轮结束必须在 `finally` 里 `exitSessionQueue`，否则服务端排队名额会一直漏。

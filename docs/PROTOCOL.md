@@ -100,6 +100,21 @@ Channel limits: GLM-5.1 / GLM-5.3 are declared at **170 000 context / 32 000 out
 this channel — below the public Zhipu spec. `deepseek-v4-flash` is a hidden model: it is
 not in `modelConfig`, but it works, and it caps at 1 044 480 input tokens.
 
+### Context window and output cap are independent
+
+`context_window` is how much input fits; `output` is how many tokens one reply may emit.
+A 1M-context model still stops at a few tens of thousands of output tokens.
+
+This matters because pi-ai picks the request's ceiling from
+`params.max_tokens ?? params.max_completion_tokens ?? model.maxTokens`
+(`openai-completions.js`), and reasoning content **shares** that budget with the answer.
+A conservative fallback there silently truncates long replies mid-reasoning, and the
+symptom is a "reached output token limit" notice that repeats after every "continue".
+
+So `maxTokens` on a model descriptor is a channel fact, not a guess: declare the ceiling
+(`DEVECO_OUTPUT_CEILING`, 32 000) whenever upstream omits `output`, never a small default.
+Upstream may also send `output` as `"32K"`; expand unit suffixes before using it.
+
 ## 5. Model catalog
 
 `codeGenie/modelConfig` returns, per account:

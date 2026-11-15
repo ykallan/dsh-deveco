@@ -12,7 +12,7 @@ import {
   routeVision,
   snapEffort,
 } from '../src/normalize.ts'
-import { DEFAULT_VISION_MODEL, DEVECO_GLM_OUTPUT_LIMIT } from '../src/config.ts'
+import { DEFAULT_VISION_MODEL, DEVECO_GLM_OUTPUT_LIMIT, DEVECO_OUTPUT_CEILING } from '../src/config.ts'
 
 describe('normalizeDeveloperRole', () => {
   it('rewrites developer messages to system', () => {
@@ -46,6 +46,13 @@ describe('normalizeMaxTokens', () => {
   it('clamps to the channel output cap', () => {
     const result = normalizeMaxTokens({ max_tokens: 131_072 }, 'GLM-5.3')
     expect(result.body.max_tokens).toBe(DEVECO_GLM_OUTPUT_LIMIT)
+    expect(result.changed).toBe(true)
+  })
+
+  it('clamps to the ceiling even for a model with no declared limit', () => {
+    // 回归：没有声明 output 的模型以前完全不钳，靠适配器兜底 8192，长回答被截断。
+    const result = normalizeMaxTokens({ max_tokens: 999_999 }, 'deepseek-v4.1-flash-1017')
+    expect(result.body.max_tokens).toBe(DEVECO_OUTPUT_CEILING)
     expect(result.changed).toBe(true)
   })
 

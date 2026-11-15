@@ -15,6 +15,7 @@
 import {
   channelLimitsFor,
   DEFAULT_CONTEXT_WINDOW,
+  DEVECO_OUTPUT_CEILING,
   DEFAULT_MAX_TOKENS,
   DEFAULT_VISION_MODEL,
   exposedModelId,
@@ -88,6 +89,26 @@ export const FALLBACK_PARAMS: readonly DevecoModelInfo[] = [
     name: 'Qwen3.5 397B (视觉)',
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     maxTokens: DEFAULT_MAX_TOKENS,
+    supportsImages: true,
+  },
+  // 上游对这两个模型有时不给 `output`：不补的话输出上限会退到很小的兜底值，
+  // 长回答/推理会在中途被截断（而上下文窗口明明是 1M）。
+  {
+    id: 'glm-5.2',
+    wireId: 'glm-5.2',
+    name: 'glm-5.2',
+    contextWindow: 202_752,
+    contextWindowKnown: true,
+    maxTokens: DEVECO_OUTPUT_CEILING,
+    supportsImages: false,
+  },
+  {
+    id: 'deepseek-v4.1-flash-1017',
+    wireId: 'deepseek-v4.1-flash-1017',
+    name: 'deepseek-v4.1-flash-1017',
+    contextWindow: 1_048_576,
+    contextWindowKnown: true,
+    maxTokens: DEVECO_OUTPUT_CEILING,
     supportsImages: true,
   },
 ]

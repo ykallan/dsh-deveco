@@ -16,6 +16,7 @@ import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { filterEnabledModels, type DevecoCatalog, type DevecoModelInfo } from './catalog.ts'
+import { outputCeiling } from './config.ts'
 import type { DevecoShim } from './shim.ts'
 
 /** 这个 bundle 拥有的 provider 路由。与 `cordis.patch.yml` 保持一致。 */
@@ -95,10 +96,17 @@ export function thinkingFields(strengths: readonly string[] | undefined): {
   return { reasoning: true, thinkingLevelMap: map }
 }
 
-/** 一条目录项 → pi-ai 模型描述（指向 shim）。 */
-function toPiModel(info: DevecoModelInfo, baseUrl: string): Model<Api> {
+/**
+ * 一条目录项 → pi-ai 模型描述（指向 shim）。
+ *
+ * `maxTokens` 是**单次输出**上限，pi-ai 在请求未带 `max_tokens` 时直接拿它当天花板；
+ * 它和 `contextWindow` 完全无关。给太小（曾经兜底 8192）会让长回答与推理在中途被截断。
+ */
+export function piModelFor(info: DevecoModelInfo, baseUrl: string): Model<Api> {
   const thinking = thinkingFields(info.thinking?.levels)
   const reasoning = info.reasoning === true || thinking.reasoning
+  const ceiling = outputCeiling()
+  const declared = info.maxTokens > 0 ? info.maxTokens : ceiling
   return {
     id: info.id,
     name: info.name,
@@ -110,7 +118,7 @@ function toPiModel(info: DevecoModelInfo, baseUrl: string): Model<Api> {
     ...thinking.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: thinking.thinkingLevelMap },
     cost: NO_COST,
     contextWindow: info.contextWindow > 0 ? info.contextWindow : 32_768,
-    maxTokens: info.maxTokens > 0 ? info.maxTokens : 8_192,
+    maxTokens: Math.min(declared, ceiling),
   } as unknown as Model<Api>
 }
 
@@ -119,7 +127,7 @@ export function createDevecoAdapter(options: DevecoAdapterOptions): DevecoAdapte
 
   const buildModels = (): Model<Api>[] => {
     const baseUrl = `${shim.baseUrl()}/v1`
-    return catalog.current().map(info => toPiModel(info, baseUrl))
+    return catalog.current().map(info => piModelFor(info, baseUrl))
   }
 
   const base = createProvider({

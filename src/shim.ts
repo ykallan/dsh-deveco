@@ -89,6 +89,15 @@ export interface ShimStats {
   lastError?: string
   lastStatus?: number
   lastLatencyMs?: number
+  /**
+   * 最近一次聊天请求**实际发出去**的 max_tokens（输出上限）。
+   *
+   * 排查「回答被截断」时这是第一现场：它和上下文窗口无关，是这个值太小才会在推理
+   * 中途撞线。为 undefined 表示请求没带 max_tokens（上游按自己的默认走）。
+   */
+  lastMaxTokens?: number
+  /** 最近一次聊天请求里 `stream` 的取值。 */
+  lastStream?: boolean
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -334,6 +343,9 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
     const normalized = normalizeChatBody(body, ctx)
     const prepared = normalized.body
     if (normalized.notes.length > 0) logger?.debug(`dsh-deveco: normalized request (${normalized.notes.join(', ')})`)
+    // 记录实际发出去的输出上限：回答被截断时这里能直接看出是不是这个值太小。
+    stats.lastMaxTokens = typeof prepared.max_tokens === 'number' ? prepared.max_tokens : undefined
+    stats.lastStream = stream
 
     // 并发闸门：上游同时只放一个生成，排不下就直接 429。
     const granted = await queue.acquire()

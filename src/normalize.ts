@@ -17,7 +17,7 @@
  * @module dsh-deveco/normalize
  */
 
-import { channelLimitsFor, DEFAULT_VISION_MODEL } from './config.ts'
+import { channelLimitsFor, DEFAULT_VISION_MODEL, outputCeiling } from './config.ts'
 
 /** pi-ai 的标准档位，按由弱到强排列。 */
 export const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
@@ -68,10 +68,10 @@ export function normalizeDeveloperRole(body: Record<string, unknown>): Normalize
 }
 
 /**
- * `max_completion_tokens` → `max_tokens`，并按渠道声明上限钳住。
+ * `max_completion_tokens` → `max_tokens`，并按渠道声明的**输出**上限钳住。
  *
- * 为什么必须钳：DSH 会把目录里的 `maxTokens` 原样作为上限发出去，而 GLM 这条渠道
- * 声明的是 32K —— 发更大的值上游直接 400（不是截断，是整条请求失败）。
+ * 注意这是输出上限（max_tokens），不是上下文窗口。渠道对 GLM 声明 32K；没有单独声明的
+ * 模型统一按 `outputCeiling()` 处理。不钳会 400，钳得太小会在中途截断长回答与推理。
  */
 export function normalizeMaxTokens(body: Record<string, unknown>, model: string): NormalizedBody {
   const next = { ...body }
@@ -80,8 +80,8 @@ export function normalizeMaxTokens(body: Record<string, unknown>, model: string)
   delete next.max_completion_tokens
   if (completion !== undefined) changed = true
   if (typeof completion === 'number' && next.max_tokens === undefined) next.max_tokens = completion
-  const cap = channelLimitsFor(model)?.output
-  if (cap !== undefined && typeof next.max_tokens === 'number' && next.max_tokens > cap) {
+  const cap = channelLimitsFor(model)?.output ?? outputCeiling()
+  if (typeof next.max_tokens === 'number' && next.max_tokens > cap) {
     next.max_tokens = cap
     changed = true
   }
