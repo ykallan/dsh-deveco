@@ -63,6 +63,30 @@ npm pack --dry-run   # 检查包里确实有 lib/index.mjs 和 lib/client/index.
 
 ---
 
+## 本机开发：一条命令装进 profile
+
+仓库自带的 `pnpm deploy` 走的是「profile 内副本 + `file:` 依赖」，重启后即可用：
+
+```bash
+pnpm install && pnpm build && pnpm deploy
+```
+
+```
+<profile>/vendor/dsh-deveco/          产物副本（lib/ + 清单 + 文档）
+<profile>/node_modules/dsh-deveco/    同一份副本（宿主立刻可解析）
+<profile>/package.json                "dsh-deveco": "file:./vendor/dsh-deveco"
+```
+
+这和方式一（插件页按目录安装）的区别只在依赖怎么写：
+
+| 依赖 | 插件文件在哪 | 风险 |
+|---|---|---|
+| `link:<checkout>`（插件页按目录安装） | 仓库里 | 仓库被 `git clean` / 误删 / 跟着 junction 递归删掉 → 下次启动 `cannot resolve profile bundle` |
+| `file:./vendor/dsh-deveco`（`pnpm deploy`） | profile 内 | 仓库随便动都不影响；升级要重新 `pnpm build && pnpm deploy` |
+| `0.1.0` 之类版本号 | profile 内 | 包没发布到 npm 时，插件页任何 pnpm 操作都会 `ERR_PNPM_FETCH_404` 并回滚 |
+
+两种方式可以互换：先用插件页装过（`link:`），再跑一次 `pnpm deploy` 就会纠正成 `file:`。
+
 ## 装完怎么验证
 
 1. **插件页** 出现 `DSH DevEco Connect`，且处于启用状态、没有报错。

@@ -31,13 +31,40 @@ import {
   rmSync,
   lstatSync,
   realpathSync,
+  rmdirSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 /** 包内需要进 profile 的顶层文件（lib/ 之外）。 */
-export const PACKAGE_ROOT_FILES = ['cordis.patch.yml', 'package.json', 'README.md', 'LICENSE']
+export const PACKAGE_ROOT_FILES = [
+  'cordis.patch.yml',
+  'package.json',
+  'README.md',
+  'README.en.md',
+  'CHANGELOG.md',
+  'INSTALL.md',
+  'LICENSE',
+]
+
+/**
+ * 摘掉一个链接（符号链接/junction），**不触碰它的目标**。
+ *
+ * 为什么不写 `rmSync(path, { recursive: true })`：Windows 上递归删除会跟进 reparse point，
+ * 把目标目录里的内容一起删掉 —— 之前一次 checkout 被清空很可能就是这么来的。
+ * @param {string} path
+ */
+export function unlinkIfLinked(path) {
+  if (!isLinkLike(path)) return false
+  try {
+    rmdirSync(path)
+  } catch {
+    // 少数情况下 rmdir 不认，退回到「删链接本身」的实现。
+    rmSync(path, { recursive: false, force: true })
+  }
+  return true
+}
 
 /** 仓库根目录（本文件在 scripts/ 下）。 */
 export const SOURCE_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -171,34 +198,38 @@ export function deploy(options = {}) {
   log(`→ profile: ${profileDir}`)
   log(`→ 源目录: ${src}`)
 
-  // 1) 包本体：lib/ 原地同步 + 顶层文件覆盖
+  // 1) 包本体：装进 profile 自己的 vendor/，再镜像到 node_modules/
+  //
+  // 为什么是「profile 内副本 + file: 依赖」，而不是 link 也不是版本号：
+  //   - **link** 把插件文件留在 checkout 里。checkout 一旦被清理（`git clean`、误删、
+  //     或者顺着 junction 递归删除），下次启动就是
+  //     `cannot resolve profile bundle "dsh-deveco"` —— 实测踩过一次；
+  //   - **版本号**（`"0.1.0"`）在包还没发布到 npm 时会让 pnpm 去 registry 找，
+  //     结果是 `ERR_PNPM_FETCH_404`，插件页安装直接回滚；
+  //   - `file:./vendor/<pkg>` 两者都避开：文件在 profile 内自足，pnpm 解析不需要 registry。
+  const vendorDir = join(profileDir, 'vendor', pkgName)
   const packageDir = join(profileDir, 'node_modules', pkgName)
-  // link 安装（插件管理器按目录安装时写 `link:`，node_modules 里是指向 checkout 的
-  // 符号链接/junction）下，目标路径就是源目录本身：继续拷只会把文件拷到自己身上。
-  // 这种安装的正确用法是「build 完重启」，所以这里直接停手并说清楚。
-  if (isLinkLike(packageDir)) {
-    log(`· ${packageDir} 是指向 checkout 的链接（link 安装）：不需要拷贝，` +
-      'build 完重启 DSH 即可。要改成拷贝安装，先删掉这个链接。')
-    return { skipped: 'link-install', packageDir }
-  }
   const files = { added: 0, updated: 0, unchanged: 0, pruned: 0 }
-  syncTree(srcLib, join(packageDir, 'lib'), files)
-  for (const name of PACKAGE_ROOT_FILES) {
-    const s = join(src, name)
-    if (!existsSync(s)) continue
-    const d = join(packageDir, name)
-    if (existsSync(d) && sameBytes(s, d)) {
-      files.unchanged++
-      continue
+  for (const dir of [vendorDir, packageDir]) {
+    if (unlinkIfLinked(dir)) log(`· 摘掉链接 ${dir}（只删链接，目标未动）`)
+    syncTree(srcLib, join(dir, 'lib'), files)
+    for (const name of PACKAGE_ROOT_FILES) {
+      const s = join(src, name)
+      if (!existsSync(s)) continue
+      const d = join(dir, name)
+      if (existsSync(d) && sameBytes(s, d)) {
+        files.unchanged++
+        continue
+      }
+      const existed = existsSync(d)
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+      copyFileSync(s, d)
+      if (existed) files.updated++
+      else files.added++
     }
-    const existed = existsSync(d)
-    if (!existsSync(packageDir)) mkdirSync(packageDir, { recursive: true })
-    copyFileSync(s, d)
-    if (existed) files.updated++
-    else files.added++
   }
   log(
-    `✓ 包本体已同步: ${packageDir}` +
+    `✓ 包本体已同步: ${vendorDir} 与 node_modules 副本` +
       ` (新增 ${files.added} / 覆盖 ${files.updated} / 未变 ${files.unchanged} / 清理 ${files.pruned})`,
   )
   if (!existsSync(join(packageDir, 'lib', 'client', 'index.js'))) {
@@ -207,21 +238,19 @@ export function deploy(options = {}) {
 
   // 2) profile/package.json 的 dependencies + bundles（缺 bundles 则插件不会被激活）
   //
-  // 关键：**不覆盖已有的版本声明**。本地部署是把 lib/ 直接拷进 node_modules，包并不是
-  // 从 registry 装的；把这里的 specifier 改成仓库里的 `version`，一旦这个版本还没发布，
-  // pnpm 就解析不到它，宿主重载 profile 时整个 bundle 掉线 —— 表现是「插件还在，但模型
-  // 全没了」。只有缺这一条（首次部署）时才补，补的也是仓库版本，因为那时没别的可参考。
+  // 依赖写成 `file:./vendor/<pkg>`：本地部署的包不在 registry 里，任何版本号/范围都只会
+  // 换来一次 404；`file:` 让 pnpm 直接从 profile 内的副本解析。已经由插件管理器写成
+  // `link:` 的旧声明也会被这一条纠正（link 指向 checkout，checkout 没了插件就没了）。
+  const spec = `file:./vendor/${pkgName}`
   const manifests = {}
   manifests.profilePackage = patchManifest(join(profileDir, 'package.json'), (json) => {
     json.dependencies = json.dependencies ?? {}
-    if (json.dependencies[pkgName] === undefined) json.dependencies[pkgName] = pkgVersion
+    json.dependencies[pkgName] = spec
     const bundles = json.dsh?.profile?.bundles
     if (Array.isArray(bundles) && !bundles.includes(pkgName)) bundles.push(pkgName)
   })
   const pinned = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')).dependencies?.[pkgName]
-  if (pinned !== undefined && pinned !== pkgVersion) {
-    log(`· profile 依赖保持 ${pinned}（仓库版本 ${pkgVersion} 只用于本地产物，发布后再由插件管理器更新）`)
-  }
+  log(`· profile 依赖: ${String(pinned)}（包版本 ${pkgVersion}；发布到 npm 后再由插件管理器改成版本号）`)
   log(
     manifests.profilePackage.changed
       ? '✓ profile/package.json dependencies + bundles'
@@ -243,12 +272,8 @@ export function deploy(options = {}) {
         : '· .package-map.json 无需改动',
   )
 
-  // 4) .modules.yaml 的 hoistedLocations
-  manifests.modulesYaml = patchManifest(join(profileDir, 'node_modules', '.modules.yaml'), (json) => {
-    json.hoistedLocations = json.hoistedLocations ?? {}
-    json.hoistedLocations[`${pkgName}@${pkgVersion}`] = [`node_modules\\${pkgName}`]
-  })
-  log(manifests.modulesYaml.changed ? '✓ .modules.yaml hoistedLocations' : '· .modules.yaml 无需改动')
+  // 4) .modules.yaml 交给 pnpm 自己维护：`file:` 依赖由 pnpm 记账，手工往
+  //    hoistedLocations 里塞 pkg@version 反而会和真实的解析结果打架。
 
   const changedFiles = files.added + files.updated + files.pruned
   log(changedFiles === 0 ? '\n· 产物无变化，manifest 全部无 BOM。' : '\n🎉 部署完成，全部 manifest 无 BOM。')

@@ -40,16 +40,25 @@ pnpm build          # 产物在 lib/：index.mjs + client/index.js
 装好后重启 DSH，在 **设置 → 插件 → DSH DevEco Connect** 里登录。
 
 <details>
-<summary>开发者：直接往本机 profile 里部署（拷贝安装）</summary>
+<summary>开发者：一条命令装进本机 profile</summary>
 
 ```bash
-pnpm deploy         # 同步 lib/ 到 ~/.dsh/profiles/desktop/node_modules/dsh-deveco
+pnpm build && pnpm deploy
 ```
 
-它只做三件事：把 `lib/` 覆盖到 profile 的插件目录、在 profile 的 `package.json` 里补一条
-`dependencies` / `dsh.profile.bundles`、刷新 pnpm 的映射文件。它**不会**改动 profile 的
-默认模型，也不会动 `cordis.patch.yml` 里别的条目。如果 profile 里那条依赖是 `link:`
-（插件管理器按目录安装的结果），脚本会直接跳过并提示「build 完重启即可」。
+`pnpm deploy` 会把构建产物装成 **profile 内自足的一份副本**，并把依赖记成
+`file:./vendor/dsh-deveco`：
+
+```
+<profile>/vendor/dsh-deveco/          产物副本（lib/ + 清单 + 文档）
+<profile>/node_modules/dsh-deveco/    同一份副本
+<profile>/package.json                "dsh-deveco": "file:./vendor/dsh-deveco"
+```
+
+这样做的原因（两种更直觉的做法都踩过坑）：`link:<checkout>` 会把插件文件留在仓库里，
+仓库一被清理就在下次启动报 `cannot resolve profile bundle`；写版本号则因为包还没发布到
+npm 而换来一次 `ERR_PNPM_FETCH_404` 并回滚安装。脚本幂等，重跑只覆盖有变化的文件，
+不会动 profile 的默认模型，也不会碰 `cordis.patch.yml` 里别的条目。
 </details>
 
 ## 使用

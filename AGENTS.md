@@ -9,16 +9,28 @@
 pnpm typecheck     # 宿主侧 tsc + 浏览器侧 tsc（两套 tsconfig，别只跑一个）
 pnpm test          # vitest，纯函数为主，不打真实上游
 pnpm build         # tsdown（宿主 ESM + 客户端 CJS），再 wrap-client 包成自注册 bundle
-pnpm deploy        # 仅「拷贝安装」时用：把 lib/ 同步进 profile；link 安装会直接跳过
+pnpm deploy        # 把 lib/ 装进 profile 的 vendor/ 与 node_modules/（依赖记成 file:）
 node scripts/smoke-apply.mjs   # 离线跑一遍 apply()：路由 / provider 注册 / 门禁，不打上游
 ```
 
-两种本地安装方式，别混用：
+本机安装方式（`pnpm deploy` 做的事）：
 
-| 方式 | profile 依赖 | 生效方式 |
-|---|---|---|
-| **link**（插件管理器按目录安装） | `link:<checkout 绝对路径>`，`node_modules/<pkg>` 是指向 checkout 的链接 | `pnpm build` 后重启 DSH；**不要**再跑 `pnpm deploy`（会把文件拷到自己身上，脚本已拦截） |
-| **拷贝**（`pnpm deploy`） | 版本号或 `file:` 声明 | 每次改动都要 `pnpm build && pnpm deploy` 
+```
+<profile>/vendor/dsh-deveco/          构建产物副本（lib/ + 清单 + 文档）
+<profile>/node_modules/dsh-deveco/    同一份副本（宿主立刻可解析）
+<profile>/package.json                "dsh-deveco": "file:./vendor/dsh-deveco"
+```
+
+为什么不是 `link:` 也不是版本号（两种都踩过）：
+
+| 做法 | 后果 |
+|---|---|
+| `link:<checkout 路径>`（插件管理器按目录安装会这么写） | 插件文件留在 checkout 里；checkout 被清理 / 误删 / 跟在 junction 后递归删除，下次启动就是 `cannot resolve profile bundle "dsh-deveco"` |
+| `"0.1.0"` 之类版本号（包没发布到 npm） | 插件页安装会 `ERR_PNPM_FETCH_404` 并回滚 |
+| **`file:./vendor/<pkg>` + profile 内副本** | 文件自足、无需 registry；`pnpm deploy` 幂等重装 |
+
+Windows 上**永远不要**用 `Remove-Item -Recurse` 删 junction/符号链接：它会跟进目标把内容一起删掉
+（脚本里的 `unlinkIfLinked()` 用 `rmdirSync` 只删链接本身）。
 
 **改了宿主侧代码必须重启 DSH 才生效。** 客户端产物由 `dsh-client-hmr` 自动送进浏览器，
 宿主模块不会热载；部署脚本只覆盖内容不同的文件，所以「重启后行为没变」通常是没重新 build。
