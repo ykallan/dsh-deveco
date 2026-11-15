@@ -1,0 +1,5 @@
+# 注册 DevEco provider，但不改动 profile 当前的默认模型。
+# 插件自带华为账号登录（浏览器授权 + 本机回环回调），不需要额外的命令行工具。
+- insert:
+    - id: llm-deveco
+      name: dsh-deveco

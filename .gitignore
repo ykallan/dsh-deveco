@@ -1,0 +1,21 @@
+node_modules/
+lib/
+coverage/
+*.log
+.DS_Store
+
+# 插件自己的凭证与台账：**绝不提交**。
+.deveco-accounts.json
+.deveco-accounts.json.*
+.deveco-checkin.json
+.deveco-usage.json
+.deveco-refresh.log
+
+# 部署/修复过程留下的备份。
+*.bak-*
+*.bak
+
+# 本地临时文件。
+.tmp-*
+*.tgz
+.pnpm-store/
