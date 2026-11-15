@@ -64,6 +64,15 @@ const MAX_ACCOUNT_ATTEMPTS = 3
 const AUTH_RETRY_DELAY_MS = 5_000
 const AUTH_RETRY_MAX = 5
 
+/**
+ * 连接层失败（ECONNRESET / 超时 / DNS）原地重试次数与间隔。
+ *
+ * 这类抖动以前会立刻换号，而单账号时「换号」等于直接失败 —— 用户看到的就是推理中途
+ * 突然中断。先原地重试一两次通常就过去了。
+ */
+const NETWORK_RETRY_MAX = 2
+const NETWORK_RETRY_DELAY_MS = 800
+
 /** 实际等待时长（测试可以设成 0 或几毫秒）。 */
 function authRetryDelayMs(): number {
   return envNumber('DEVECO_AUTH_RETRY_DELAY_MS', AUTH_RETRY_DELAY_MS)
@@ -103,6 +112,15 @@ export interface DevecoShim {
   stats(): ShimStats
 }
 
+/** 一条失败的滚动记录。 */
+export interface ShimFailure {
+  at: number
+  account: string
+  status: number
+  kind: string
+  message: string
+}
+
 /** 诊断快照。 */
 export interface ShimStats {
   port: number
@@ -129,6 +147,13 @@ export interface ShimStats {
   lastStreamAuthError?: string
   /** 最近一次请求里，因 401 触发的重试次数（0–5）。 */
   lastAuthRetry?: number
+  /**
+   * 最近的失败记录（最多 5 条，最新在前）。
+   *
+   * 只留最后一次的统计没法解释「几分钟前那次为什么失败」—— 后续成功的请求会把它覆盖掉。
+   * 这份滚动记录让下一次出现问题时，一条 /doctor 就能看到真实原因。
+   */
+  recentFailures?: ShimFailure[]
 }
 
 /** 可被 abort 打断的等待。 */
@@ -218,6 +243,18 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
   let server: Server | undefined
   let port = 0
   const stats: ShimStats = { port: 0 }
+
+  /**
+   * 记一条失败，供 /doctor 回看。
+   *
+   * 为什么需要：统计字段只保留「最后一次请求」，一次成功就会把几分钟前的失败擦掉 ——
+   * 用户再来问「刚才为什么失败」时已经无从查证。滚动保留最近 5 条。
+   */
+  const recordFailure = (account: string, status: number, kind: string, message: string): void => {
+    const trimmed = message.length > 300 ? `${message.slice(0, 300)}…` : message
+    const next: ShimFailure = { at: Date.now(), account, status, kind, message: trimmed }
+    stats.recentFailures = [next, ...(stats.recentFailures ?? [])].slice(0, 5)
+  }
 
   const authorized = (req: IncomingMessage): boolean => {
     const header = req.headers.authorization
@@ -418,12 +455,15 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
     res.on('close', onClose)
     const exclude = new Set<string>()
     let lastError: UpstreamError | undefined
+    /** 本请求真正尝试过的账号数（用于区分「压根没有可用账号」和「试过但都失败了」）。 */
+    let attemptedAccounts = 0
 
     try {
       for (let index = 0; index < MAX_ACCOUNT_ATTEMPTS; index += 1) {
         const ready = await pool.waitForFreeSlot(SLOT_WAIT_MS, controller.signal)
         if (!ready) {
-          lastError = {
+          // 已经有真实错误时不要用「都很忙」覆盖它。
+          lastError ??= {
             kind: 'rate-limit',
             status: 429,
             message: 'every DevEco account is busy right now; please retry shortly',
@@ -434,15 +474,21 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
         }
         const accountId = pool.pick(exclude)
         if (accountId === undefined) {
-          lastError = {
-            kind: 'auth',
-            status: 401,
-            message: 'no usable DevEco account; sign in from the DevEco plugin card',
-            retryable: false,
-            needsLogin: true,
+          // **关键**：只有「一个账号都没试过」才说明池里真的没有可用账号。
+          // 之前这里无条件覆盖 lastError，于是单账号场景下「第一次尝试的真实错误」
+          // 会被换成一句误导性的「no usable DevEco account」，DSH 再显示成「API 密钥无效」。
+          if (attemptedAccounts === 0) {
+            lastError = {
+              kind: 'auth',
+              status: 401,
+              message: 'no usable DevEco account; sign in from the DevEco plugin card',
+              retryable: false,
+              needsLogin: true,
+            }
           }
           break
         }
+        attemptedAccounts += 1
         if (!pool.acquire(accountId)) {
           exclude.add(accountId)
           continue
@@ -470,6 +516,7 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
           let response: Response | undefined
           let started = Date.now()
           let authAttempts = 0
+          let networkAttempts = 0
           /**
            * 401 的处理：**等 5 秒 → 刷新令牌 → 重试**，最多 5 次。
            *
@@ -491,14 +538,28 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
                 signal: controller.signal,
               })
             } catch (error: unknown) {
+              const message = error instanceof Error ? error.message : String(error)
               usage.record({ account: accountId, model: wireModel, ok: false, ms: Date.now() - started })
               pool.noteError(accountId, 3, 30_000, 'network error')
               lastError = {
                 kind: 'network',
                 status: 0,
-                message: error instanceof Error ? error.message : String(error),
+                message,
                 retryable: true,
                 needsLogin: false,
+              }
+              recordFailure(accountId, 0, 'network', message)
+              // 连接重置/超时这类抖动先原地重试一次，别急着换号（单账号时换号等于直接失败）。
+              if (networkAttempts < NETWORK_RETRY_MAX && !controller.signal.aborted) {
+                networkAttempts += 1
+                logger?.warn(`dsh-deveco: upstream connection failed (${message}); `
+                  + `retry ${networkAttempts}/${NETWORK_RETRY_MAX}`)
+                await sleep(NETWORK_RETRY_DELAY_MS, controller.signal)
+                if (controller.signal.aborted) {
+                  response = undefined
+                  break
+                }
+                continue
               }
               exclude.add(accountId)
               response = undefined
@@ -567,6 +628,7 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
           usage.record({ account: accountId, model: wireModel, ok: false, ms: Date.now() - started })
           stats.lastStatus = response.status
           stats.lastError = `${classified.kind}: ${message}`
+          recordFailure(accountId, response.status, classified.kind, message)
           // 额度用尽与「服务过载」不是一回事：只有前者才记进额度状态。
           if (looksLikeQuotaExhausted(response.status, message)) {
             quota.noteExhausted(accountId, message)

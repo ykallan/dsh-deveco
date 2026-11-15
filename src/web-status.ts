@@ -737,6 +737,15 @@ function doctorHandler(deps: DevecoRouteOptions): Handler {
               + `(refreshing ${status.authPolicy.refreshSkewMinutes} min early)`,
       },
       {
+        id: 'recent-failures',
+        ok: (shim.recentFailures ?? []).length === 0,
+        detail: (shim.recentFailures ?? []).length === 0
+          ? 'no failed upstream call recorded since start'
+          : (shim.recentFailures ?? []).slice(0, 3).map(failure =>
+              `${new Date(failure.at).toISOString()} ${failure.kind}/${failure.status || 'n-a'} `
+              + `on ${failure.account}: ${failure.message}`).join(' | '),
+      },
+      {
         id: 'auth-retry',
         ok: (shim.lastAuthRetry ?? 0) < 5,
         detail: shim.lastStreamAuthError !== undefined

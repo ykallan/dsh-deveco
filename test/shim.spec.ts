@@ -40,6 +40,8 @@ interface Harness {
   token: string
   store: DevecoAccountStore
   pool: DevecoAccountPool
+  /** shim 句柄，便于断言 stats（滚动失败记录等）。 */
+  shim: ReturnType<typeof createDevecoShim>
   close: () => Promise<void>
 }
 
@@ -69,7 +71,7 @@ async function buildShim(credential: DevecoCredential, options: { onAccountIdle?
     ...options.onAccountIdle === undefined ? {} : { onAccountIdle: options.onAccountIdle },
   })
   await shim.ready
-  return { baseUrl: shim.baseUrl(), token: shim.token(), store, pool, close: () => shim.close() }
+  return { baseUrl: shim.baseUrl(), token: shim.token(), store, pool, shim, close: () => shim.close() }
 }
 
 function credential(overrides: Partial<DevecoCredential> = {}): DevecoCredential {
@@ -217,6 +219,74 @@ describe('shim 401 handling', () => {
       // 请求结束、槽位归零 → 外层据此立刻补刷挂起的续期。
       expect(idle).toEqual(['u-1'])
       expect(harness.pool.get('u-1')?.activeConcurrent).toBe(0)
+    } finally {
+      await harness.close()
+    }
+  })
+
+  it('surfaces the real upstream error instead of masking it as "no usable account"', async () => {
+    // 只有 1 个账号：第一次尝试失败后会被排除，第二次 pick 就空。
+    // 以前这个分支会用一句 401「no usable DevEco account」把真实错误盖掉 ——
+    // DSH 于是一直显示「API 密钥无效」，而真正的原因是网络/上游错误。
+    const harness = await buildShim(credential())
+    process.env.DEVECO_AUTH_RETRY_DELAY_MS = '1'
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (isLoopback(url)) return realFetch(input as never)
+      if (url.includes('/exitSessionQueue')) return new Response('{}', { status: 200 })
+      if (url.includes('/jwToken/check')) return new Response('{}', { status: 200 })
+      if (url.includes('/chat/completions')) {
+        // 上游 500：可重试，但换号没用（只有这一个号）。
+        return new Response(JSON.stringify({ error: { message: 'upstream exploded' } }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected upstream call: ${url}`)
+    }) as typeof fetch
+
+    try {
+      const result = await chat(harness, {
+        model: 'GLM-5.1-DevEco',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      })
+      expect(result.status).toBe(500)
+      // 关键：必须能看到真实原因，而不是「no usable DevEco account」。
+      expect(result.text).toContain('upstream exploded')
+      expect(result.text).not.toContain('no usable DevEco account')
+      // 失败也进了滚动记录，后续可用 /doctor 回看。
+      expect(harness.shim.stats().recentFailures?.[0]?.message).toContain('upstream exploded')
+    } finally {
+      await harness.close()
+    }
+  })
+
+  it('retries a connection failure in place before giving up (single account)', async () => {
+    const harness = await buildShim(credential())
+    let attempts = 0
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (isLoopback(url)) return realFetch(input as never)
+      if (url.includes('/exitSessionQueue')) return new Response('{}', { status: 200 })
+      if (url.includes('/chat/completions')) {
+        attempts += 1
+        if (attempts === 1) throw new Error('ECONNRESET')
+        return new Response(SSE_BODY, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error(`unexpected upstream call: ${url}`)
+    }) as typeof fetch
+
+    try {
+      const result = await chat(harness, {
+        model: 'GLM-5.1-DevEco',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      })
+      // 一次连接抖动不该让整轮失败。
+      expect(result.status).toBe(200)
+      expect(result.text).toContain('hello')
+      expect(attempts).toBe(2)
     } finally {
       await harness.close()
     }
