@@ -763,10 +763,16 @@ function doctorHandler(deps: DevecoRouteOptions): Handler {
       },
       {
         id: 'quota',
-        ok: status.quota.exhausted.length < Math.max(1, status.accounts.length),
+        // 只要有账号被上游判过「额度用尽」就是 FAIL：以前写的是
+        // `exhausted.length < max(1, accounts.length)`，单账号时恒为 true，等于永远看不出来。
+        ok: status.quota.exhausted.length === 0,
         detail: status.quota.exhausted.length === 0
           ? `no account is marked out of quota; window resets in ${status.quota.resetIn}`
-          : `${status.quota.exhausted.length} account(s) out of quota until ${status.quota.window.label}`,
+          : `${status.quota.exhausted.length} account(s) out of quota`
+            + (status.quota.exhaustedUntil === undefined
+              ? `; window resets in ${status.quota.resetIn}`
+              : `; upstream says it resets at ${new Date(status.quota.exhaustedUntil).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`)
+            + ` — ${status.quota.accounts[status.quota.exhausted[0] as string]?.message ?? 'no upstream detail'}`,
       },
     ]
     json(res, 200, {

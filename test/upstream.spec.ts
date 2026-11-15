@@ -143,6 +143,23 @@ describe('classifyUpstreamError', () => {
     expect(error.retryable).toBe(false)
   })
 
+  it('classifies a 403 free-quota exhaustion as non-retryable quota, not overload', () => {
+    // 实测原文（2026-11-15）。
+    const message = 'You have used up your free quota for the current cycle (used 100027684 tokens). '
+      + 'Your quota will automatically reset at 2026-11-16 00:00:00. '
+      + 'For a higher quota, please complete real-name verification.'
+    const error = classifyUpstreamError(403, message)
+    expect(error.kind).toBe('quota')
+    expect(error.retryable).toBe(false)
+    expect(error.needsLogin).toBe(false)
+  })
+
+  it('still treats a genuine 403 overload as retryable', () => {
+    const error = classifyUpstreamError(403, 'ModelServiceError: Built-in model service is currently overloaded')
+    expect(error.kind).toBe('overloaded')
+    expect(error.retryable).toBe(true)
+  })
+
   it('treats a 403 session complaint as retryable without forcing a re-login', () => {
     const error = classifyUpstreamError(403, 'New session request rate exceeded')
     expect(error.needsLogin).toBe(false)

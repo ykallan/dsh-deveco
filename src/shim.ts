@@ -31,7 +31,7 @@ import type { DevecoAccountPool } from './account-pool.ts'
 import { filterEnabledModels, type DevecoCatalog, type DevecoModelInfo } from './catalog.ts'
 import { normalizeChatBody, type NormalizeContext } from './normalize.ts'
 import { DevecoQueueGate, QUEUE_FULL_MESSAGE } from './queue.ts'
-import { looksLikeQuotaExhausted, type DevecoQuotaTracker } from './quota.ts'
+import { looksLikeQuotaExhausted, parseQuotaResetAt, type DevecoQuotaTracker } from './quota.ts'
 import type { DevecoUsageTracker } from './usage.ts'
 import {
   buildChatHeaders,
@@ -632,6 +632,22 @@ export function createDevecoShim(options: DevecoShimOptions): DevecoShim {
           // 额度用尽与「服务过载」不是一回事：只有前者才记进额度状态。
           if (looksLikeQuotaExhausted(response.status, message)) {
             quota.noteExhausted(accountId, message)
+          }
+          if (classified.kind === 'quota') {
+            // 免费额度用尽：同一个账号重试、换号都没有意义，直接把「什么时候恢复」告诉用户。
+            const resetAt = parseQuotaResetAt(message)
+            const resetText = resetAt === undefined
+              ? ''
+              : ` It resets at ${new Date(resetAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}.`
+            lastError = {
+              kind: 'quota',
+              status: response.status,
+              message: `DevEco free quota for this account is used up.${resetText} ${message}`,
+              retryable: false,
+              needsLogin: false,
+            }
+            exclude.add(accountId)
+            break
           }
           if (classified.needsLogin) {
             if (authAttempts >= AUTH_RETRY_MAX) {

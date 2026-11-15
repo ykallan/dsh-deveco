@@ -4,6 +4,7 @@ import {
   DevecoQuotaTracker,
   formatQuotaRemaining,
   looksLikeQuotaExhausted,
+  parseQuotaResetAt,
   quotaWindow,
   quotaWindowKey,
 } from '../src/quota.ts'
@@ -89,6 +90,13 @@ describe('formatQuotaRemaining', () => {
 })
 
 describe('looksLikeQuotaExhausted', () => {
+  it('recognises the upstream free-quota wording seen in the wild', () => {
+    const message = 'You have used up your free quota for the current cycle (used 100027684 tokens). '
+      + 'Your quota will automatically reset at 2026-11-16 00:00:00. '
+      + 'For a higher quota, please complete real-name verification.'
+    expect(looksLikeQuotaExhausted(403, message)).toBe(true)
+  })
+
   it('recognises the upstream quota signals', () => {
     expect(looksLikeQuotaExhausted(429, 'slow down')).toBe(true)
     expect(looksLikeQuotaExhausted(403, '{"error":{"type":"UserRateLimit"}}')).toBe(true)
@@ -106,6 +114,42 @@ describe('looksLikeQuotaExhausted', () => {
     expect(looksLikeQuotaExhausted(401, 'unauthorized')).toBe(false)
     expect(looksLikeQuotaExhausted(500, 'internal error')).toBe(false)
     expect(looksLikeQuotaExhausted(400, 'the request param is invalid')).toBe(false)
+  })
+})
+
+describe('parseQuotaResetAt', () => {
+  const MESSAGE = 'You have used up your free quota for the current cycle (used 100027684 tokens). '
+    + 'Your quota will automatically reset at 2026-11-16 00:00:00. '
+    + 'For a higher quota, please complete real-name verification.'
+
+  it('reads the reset instant out of the upstream message', () => {
+    const now = new Date(2026, 10, 15, 22, 55, 0).getTime()
+    const at = parseQuotaResetAt(MESSAGE, now)
+    expect(at).toBeDefined()
+    const parsed = new Date(at as number)
+    expect(parsed.getFullYear()).toBe(2026)
+    expect(parsed.getMonth()).toBe(10)   // 11 月
+    expect(parsed.getDate()).toBe(16)
+    expect(parsed.getHours()).toBe(0)
+  })
+
+  it('returns undefined when the message carries no reset time', () => {
+    expect(parseQuotaResetAt('quota exceeded', Date.now())).toBeUndefined()
+  })
+
+  it('rejects an absurd date', () => {
+    const now = Date.now()
+    expect(parseQuotaResetAt('reset at 1999-01-01 00:00:00', now)).toBeUndefined()
+  })
+
+  it('feeds the tracker so the snapshot can promise a recovery time', () => {
+    const now = new Date(2026, 10, 15, 12, 0, 0).getTime()
+    const tracker = new DevecoQuotaTracker({ now: () => now })
+    tracker.noteExhausted('a', MESSAGE)
+    const snapshot = tracker.snapshot(['a'])
+    expect(snapshot.exhausted).toEqual(['a'])
+    expect(snapshot.exhaustedUntil).toBeDefined()
+    expect(snapshot.accounts.a?.resetAt).toBe(snapshot.exhaustedUntil)
   })
 })
 

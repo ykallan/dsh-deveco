@@ -204,7 +204,7 @@ export async function exitSessionQueue(
 }
 
 /** 上游错误的归类。 */
-export type UpstreamErrorKind = 'auth' | 'rate-limit' | 'overloaded' | 'context' | 'model' | 'server' | 'network'
+export type UpstreamErrorKind = 'auth' | 'rate-limit' | 'overloaded' | 'quota' | 'context' | 'model' | 'server' | 'network'
 
 /** 把一次失败的响应翻译成可操作的错误。 */
 export interface UpstreamError {
@@ -250,7 +250,14 @@ export function classifyUpstreamError(status: number, message: string): Upstream
     return { kind: 'auth', status, message, retryable: false, needsLogin: true }
   }
   if (status === 403) {
-    // 403 有两种：会话频率/账号被拒（换号有用），以及模型服务过载（换号也可能有用）。
+    // 403 有三类，必须分开：
+    //  1. 本周期免费额度用尽（实测：`used up your free quota ... reset at ...`）——
+    //     换号没用（同一个账号），重试也没用，属于**不可重试**，且要让界面显示成额度问题；
+    //  2. 会话频率/权限被拒 —— 换号/重试有用；
+    //  3. 模型服务过载（`Built-in model service is currently overloaded`）—— 换号可能有用。
+    if (looksLikeQuotaMessage(text)) {
+      return { kind: 'quota', status, message, retryable: false, needsLogin: false }
+    }
     if (text.includes('session') || text.includes('forbidden') || text.includes('permission')) {
       return { kind: 'auth', status, message, retryable: true, needsLogin: false }
     }
@@ -269,6 +276,14 @@ export function classifyUpstreamError(status: number, message: string): Upstream
     return { kind: 'server', status, message, retryable: true, needsLogin: false }
   }
   return { kind: 'server', status, message, retryable: status >= 500, needsLogin: false }
+}
+
+/** 这条 403 是不是「免费额度用尽」（措辞见 quota.ts 的注释）。 */
+function looksLikeQuotaMessage(text: string): boolean {
+  if (/overloaded|full inference timed out/.test(text)) return false
+  return /used up\b.*\bquota/.test(text)
+    || /\bquota\b.*\breset/.test(text)
+    || /insufficient_quota|usage_not_included|quota exceeded|freeusagelimiterror/.test(text)
 }
 
 function looksLikeLengthError(text: string): boolean {

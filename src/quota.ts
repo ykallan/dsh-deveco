@@ -96,6 +96,8 @@ export interface QuotaAccountState {
   at: number
   /** 上游给的原文（诊断用，可能为空）。 */
   message?: string
+  /** 上游承诺的重置时刻（epoch ms），从原文解析；解析不到就是 undefined。 */
+  resetAt?: number
 }
 
 /** 给卡片用的额度快照。 */
@@ -107,6 +109,12 @@ export interface QuotaSnapshot {
   resetIn: string
   /** 本窗口内被上游挡过的账号 id。 */
   exhausted: string[]
+  /**
+   * 上游承诺的**最早**恢复时刻（epoch ms）。
+   *
+   * 拿得到时界面就说「额度已用尽，XX 重置」，而不是让用户盯着 08:00 的窗口去猜。
+   */
+  exhaustedUntil?: number
   /** 各账号的状态（只包含被记录过的）。 */
   accounts: Record<string, QuotaAccountState>
   /**
@@ -117,20 +125,47 @@ export interface QuotaSnapshot {
 }
 
 /**
- * 判断一次上游失败是不是「今日免费额度用尽」。
+ * 判断一次上游失败是不是「本周期免费额度用尽」。
  *
- * 与「过载」「普通限流」区分开：上游服务过载会回 `403 ModelServiceError`
- * （`Built-in model service is currently overloaded` / `Full inference timed out`），
- * 那是**别人**把机器占满了，不是你的额度没了，不该记成额度用尽。
+ * 实测原文（2026-11-15，403）：
+ * `You have used up your free quota for the current cycle (used 100027684 tokens).
+ *  Your quota will automatically reset at 2026-11-16 00:00:00.`
+ *
+ * 与「过载」区分：上游服务过载会回 `ModelServiceError` / `Built-in model service is
+ * currently overloaded` / `Full inference timed out` —— 那是**别人**把机器占满了，
+ * 不是你的额度没了，不该记成额度用尽，也不该就此停下。
  */
 export function looksLikeQuotaExhausted(status: number, message: string): boolean {
   const text = message.toLowerCase()
   if (/overloaded|full inference timed out|service is currently overloaded/.test(text)) return false
+  // 「used up your free quota」「quota will automatically reset」是实测的额度用尽措辞。
+  if (/used up\b.*\bquota/.test(text)) return true
+  if (/\bquota\b.*\breset/.test(text)) return true
   if (/freeusagelimiterror|free usage|insufficient_quota|usage_not_included|quota exceeded/.test(text)) return true
   if (/额度|配额/.test(message)) return true
   if (status === 403 && /userratelimit|rate limit|too many requests|rate increased too quickly/.test(text)) return true
   if (status === 429) return true
   return false
+}
+
+/**
+ * 从「额度用尽」的原文里取出**重置时间**（epoch ms）。拿不到就返回 undefined。
+ *
+ * 实测格式：`Your quota will automatically reset at 2026-11-16 00:00:00.`
+ * 时区按本地时间理解（上游用的是北京时间）。
+ */
+export function parseQuotaResetAt(message: string, now = Date.now()): number | undefined {
+  const match = /reset\s+at\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/i.exec(message)
+  if (match === null) return undefined
+  const [, year, month, day, hour, minute, second] = match
+  const at = new Date(
+    Number(year), Number(month) - 1, Number(day),
+    Number(hour), Number(minute), Number(second),
+  ).getTime()
+  if (!Number.isFinite(at)) return undefined
+  // 明显离谱的值（解析错年）就当没有。
+  if (at < now - 30 * 24 * 60 * 60 * 1000 || at > now + 400 * 24 * 60 * 60 * 1000) return undefined
+  return at
 }
 
 /**
@@ -150,12 +185,14 @@ export class DevecoQuotaTracker {
   /** 上游判了这个账号本窗口的额度用尽。 */
   noteExhausted(id: string, message: string): void {
     const window = quotaWindowKey(this.now())
+    const resetAt = parseQuotaResetAt(message, this.now())
     this.states.set(id, {
       id,
       window,
       exhausted: true,
       at: this.now(),
       ...message === '' ? {} : { message: message.length > 300 ? `${message.slice(0, 300)}…` : message },
+      ...resetAt === undefined ? {} : { resetAt },
     })
   }
 
@@ -190,11 +227,16 @@ export class DevecoQuotaTracker {
       accounts[id] = state
       if (state.exhausted) exhausted.push(id)
     }
+    // 上游承诺的恢复时刻：取被挡账号里最早的那个，界面直接告诉用户何时再试。
+    const untils = exhausted
+      .map(id => accounts[id]?.resetAt)
+      .filter((value): value is number => typeof value === 'number' && value > now)
     return {
       window,
       resetInMs: Math.max(0, window.end - now),
       resetIn: formatQuotaRemaining(window.end - now),
       exhausted,
+      ...untils.length === 0 ? {} : { exhaustedUntil: Math.min(...untils) },
       accounts,
       hasUpstreamEndpoint: false,
     }

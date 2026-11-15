@@ -292,6 +292,45 @@ describe('shim 401 handling', () => {
     }
   })
 
+  it('reports a 403 free-quota exhaustion as a quota error with its reset time (no retry)', async () => {
+    const harness = await buildShim(credential())
+    let attempts = 0
+    const QUOTA = 'You have used up your free quota for the current cycle (used 100027684 tokens). '
+      + 'Your quota will automatically reset at 2099-01-01 00:00:00. '
+      + 'For a higher quota, please complete real-name verification.'
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input)
+      if (isLoopback(url)) return realFetch(input as never)
+      if (url.includes('/exitSessionQueue')) return new Response('{}', { status: 200 })
+      if (url.includes('/chat/completions')) {
+        attempts += 1
+        return new Response(JSON.stringify({ error: { message: QUOTA } }), {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected upstream call: ${url}`)
+    }) as typeof fetch
+
+    try {
+      const result = await chat(harness, {
+        model: 'GLM-5.1-DevEco',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      })
+      // 额度用尽不是「密钥无效」：状态码应保留 403，且只请求一次（换号/重试都没意义）。
+      expect(result.status).toBe(403)
+      expect(attempts).toBe(1)
+      expect(result.text).toContain('free quota')
+      expect(result.text).toContain('2099')
+      expect(result.text).not.toMatch(/sign in again/i)
+      // 账号被标成额度用尽，体检的 quota 项才会 FAIL。
+      expect(harness.shim.stats().recentFailures?.[0]?.kind).toBe('quota')
+    } finally {
+      await harness.close()
+    }
+  })
+
   it('records a TTL sample when upstream 401s a token it issued 20 minutes ago', async () => {
     // 令牌签发于 20 分钟前 → 这次 401 就是一个「20 分钟寿命」的上界样本。
     const harness = await buildShim(credential({
