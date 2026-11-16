@@ -3,19 +3,20 @@
 这个插件是一个 **DSH bundle**：一个 npm 包 + 一份 `cordis.patch.yml`。它由 DSH 的
 插件管理器装进某个 profile，装完重启 DSH，就能在「设置 → 插件」里看到它。
 
-> **先看清楚一件事**：本仓库只有源码，**没有 `lib/`**（`.gitignore` 排除了它）。
-> `package.json` 的入口是 `lib/index.mjs`，所以无论用哪种方式安装，都**必须先构建一次**。
-> 直接从 GitHub 装、或 `npm install` 源码，都会得到一个「声明了 bundle 但入口不存在」的包。
+> **构建产物 `lib/` 已在仓库内提交**（`index.mjs`、`client/index.js` 等），所以三种安装方式都**不需要**先构建。
+> `package.json` 的入口是 `lib/index.mjs`；如果你改动了 `src/`，请用 `pnpm build` 重新生成 `lib/` 并一起提交。
+> 对一个没有 `lib/` 的提交安装，会得到「声明了 bundle 但入口不存在」的包 ——
+> 表现就是插件页里没有「账号管理」那张卡片。
 
 ---
 
-## 方式一：本地构建后按目录安装（推荐，当前仓库状态可用）
+## 方式一：按本地目录安装（推荐）
 
 ```bash
 git clone https://github.com/ykallan/dsh-deveco.git
 cd dsh-deveco
-pnpm install
-pnpm build          # 产物在 lib/：index.mjs + client/index.js
+# lib/ 已提交，无需构建；只有改过 src/ 才需要：
+# pnpm install && pnpm build
 ```
 
 然后在 DSH 里安装这个**目录**：
@@ -42,26 +43,17 @@ pnpm build
 npm pack --dry-run   # 检查包里确实有 lib/index.mjs 和 lib/client/index.js
 ```
 
-## 方式三：直接从 GitHub 安装（需要先加 `prepare`）
+## 方式三：直接从 GitHub 安装
 
-`plugin_manager` 的 `install_bundle` 接受 git 地址（装 GitHub 仓库前会先 `git ls-remote`
-探一次连通性），但 pnpm 只会在安装时执行包自己的 `prepare` 脚本 —— 本仓库目前**没有**
-这个脚本，所以直接 `github:` 安装会缺 `lib/`。要支持这条路径，给 `package.json` 加上：
+`plugin_manager` 的 `install_bundle` 接受 git 地址（装 GitHub 仓库前会先 `git ls-remote` 探一次连通性）。
+仓库里已经带上了构建产物 `lib/`，所以直接填 `github:ykallan/dsh-deveco`
+（或 `https://github.com/ykallan/dsh-deveco.git`）即可，安装时不需要任何构建步骤。
 
-```json
-"scripts": {
-  "prepare": "tsdown && node scripts/wrap-client.mjs"
-}
-```
+注意三点：
 
-再提交、推送。之后填 `github:ykallan/dsh-deveco` 即可。注意三点：
-
-- 安装时会下载 devDependencies（`tsdown`、`lightningcss` 原生二进制等），比方式一慢；
-- pnpm 可能要求批准这个构建脚本，插件页会给出「允许这些脚本并重试」；
-- 这种安装会钉在一个提交上；升级需要换 spec（管理器只会对**完整 40 位提交**的 git 依赖
-  提供更新通道）。
-
----
+- 安装只会拉取当前提交（含 `lib/`）；如果你改过 `src/` 却没重新提交 `lib/`，装进去的就是旧产物；
+- 这种安装会钉在一个提交上；升级需要换 spec（管理器只会对**完整 40 位提交**的 git 依赖提供更新通道）；
+- 如果安装后仍看不到「账号管理」卡片，先确认该提交里确实有 `lib/client/index.js`，再重启 DSH。
 
 ## 本机开发：一条命令装进 profile
 
@@ -104,7 +96,7 @@ curl http://127.0.0.1:58852/api/deveco/status
 
 ## 升级
 
-- **方式一（link 安装）**：`git pull && pnpm install && pnpm build`，然后重启 DSH。
+- **方式一（link 安装）**：`git pull`（`lib/` 随仓库更新）；改过源码再 `pnpm build`，然后重启 DSH。
 - **方式二（npm）**：插件页对 registry 依赖提供版本列表与「更新」。
 - **方式三（git）**：把 spec 换成新的完整提交并重装。
 
@@ -118,6 +110,7 @@ curl http://127.0.0.1:58852/api/deveco/status
 | 现象 | 原因 |
 |---|---|
 | 插件页显示「未运行 / 无法加载」 | `lib/` 不存在或没构建完；先 `pnpm build` |
+| 插件页能打开，但没有「账号管理」卡片（一片空白） | 装的是没 `lib/` 的包（`lib/client/index.js` 不存在）：该提交没带构建产物，或 DSH 没重启。换带 `lib/` 的提交并重启，或本地 `pnpm build` 后按目录安装 |
 | 装完没反应 | 没重启 DSH（不开 HMR 时组合包只在启动时读取） |
 | 添加时提示 `already-installed` | 这个包已经在 profile 依赖里，先移除再添加 |
 | 添加时提示 `not-a-bundle` | 装的不是 bundle（缺 `dsh.bundle.patch`） |

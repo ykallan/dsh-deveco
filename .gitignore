@@ -1,6 +1,6 @@
 node_modules/
-lib/
 coverage/
+# 构建产物 lib/ 已入库（GitHub 安装开箱即用，见 INSTALL.md）
 *.log
 .DS_Store
 
@@ -19,6 +19,7 @@ coverage/
 .tmp-*
 *.tgz
 .pnpm-store/
+.store/
 
 # 排障用的临时脚本（会读本机凭证，绝不入库）。
 .diag-*.cjs

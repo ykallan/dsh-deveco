@@ -27,10 +27,14 @@
 
 ## 安装
 
-插件是一个 DSH bundle。**注意：仓库里没有 `lib/`（构建产物不入库），任何安装方式都要先构建。**
-三种安装方式（本地目录 / npm / git）的完整步骤见 [INSTALL.md](INSTALL.md)。
+插件是一个 DSH bundle。**构建产物 `lib/` 已随仓库提交**，所以本地目录、GitHub、npm 三种安装方式都**不需要**你自己构建。
+完整步骤见 [INSTALL.md](INSTALL.md)：
 
-最短路径：先构建，再在 DSH 的**插件页 → 添加插件**里填这个目录的绝对路径。
+- **GitHub**：填 `github:ykallan/dsh-deveco`，装完重启 DSH 即可；
+- **本地目录**：把仓库目录的绝对路径填进插件页；
+- **npm**：直接填 `dsh-deveco`（发布后）。
+
+只有在改过 `src/` 之后才需要 `pnpm build` 并重新提交 `lib/`。
 
 ```bash
 git clone https://github.com/ykallan/dsh-deveco.git
