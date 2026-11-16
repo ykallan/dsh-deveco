@@ -2,7 +2,7 @@
   "name": "dsh-deveco",
   "displayName": "DSH DevEco Connect",
   "description": "把华为 DevEco Code（CodeGenie MaaS）接入 DeepSeek Harness —— 内置华为账号登录，登录后即可在 DSH 里使用 GLM-5.1 / GLM-5.3 / Qwen 视觉模型；支持多账号池、动态模型目录与每日签到打卡。",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packageManager": "pnpm@11.28.5",
   "author": "elegant01",
   "keywords": [

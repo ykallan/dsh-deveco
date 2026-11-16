@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- **安装**：构建产物 `lib/` 随仓库提交。GitHub（`github:ykallan/dsh-deveco`）与本地目录安装均无需再自行构建；
+  修复了此前从 GitHub 安装后宿主加载 `lib/index.mjs` 失败、插件页没有「账号管理」卡片的问题。
+
 ## 0.1.0
 
 首个版本：把 DevEco Code（CodeGenie MaaS）接入 DeepSeek Harness。
