@@ -15,7 +15,7 @@ check-in and a local usage ledger.
 | **Huawei sign-in** | Browser authorization with a loopback callback (`127.0.0.1:10101 / 34567–34570`). No CLI, no API key. A pasted `jwtToken` also works. |
 | **Multi-account** | One credential doc per profile, per-account refresh (single-flight + generation guard), pause / pin / rename / remove, automatic failover to another account on errors. |
 | **Live model catalog** | Pulled from `codeGenie/modelConfig` at startup and hourly, merged across accounts; an allowlist narrows what the pickers offer. |
-| **Thinking effort** | Models that declare tiers (GLM-5.3: Low/High/Max) show those; models that only publish `thinking_mode: "configurable"` (glm-5.2, deepseek-v4.1-flash-1017) show the measured Minimal → Max set. |
+| **Thinking effort** | Per-model tiers (deepseek-v4.1-flash: Low/High/Max, glm-5.2: High/Max), default High, plus Off to really stop thinking. |
 | **Daily check-in** | DevEco exposes no points or claim endpoint (see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §6), so the check-in is a real daily probe: fetch each account's catalog, record the result, keep a streak, and mark a rejected credential for re-login. |
 | **Local usage ledger** | Requests and tokens, aggregated by day / account / model. |
 | **Request normalisation** | Role enum, `tool_choice` enum, output-cap clamp, effort snapping, explicit thinking request, vision rerouting. |
@@ -33,19 +33,22 @@ Restart DSH, then open **Settings → Plugins → DSH DevEco Connect** and sign 
 
 ## Thinking effort
 
-Next to the model picker DSH offers `Minimal / Low / Medium / High / Xhigh / Max`.
+The picker offers thinking tiers **per model**, from that model's own capability:
 
-- **Models that declare tiers** (`GLM-5.3` declares `low|high|max`) show exactly those, and
-  any other value is snapped to the nearest declared tier.
-- **Models that only publish `thinking_mode: "configurable"`** (`glm-5.2`,
-  `deepseek-v4.1-flash-1017`) accept six tiers upstream (measured:
-  `none|minimal|low|medium|high|xhigh|max`, see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4);
-  the plugin backfills that measured set.
-- **There is no Off.** With no tier selected the plugin sends **no** `reasoning_effort`, so
-  the upstream default applies (deepseek: high, glm-5.2: max). Offering Off would make
-  pi-ai send `reasoning_effort: none` for "nothing selected" too, silently disabling
-  thinking for everyone — so `off` is pinned to `null`. Use `Minimal` when you want as
-  little thinking as possible (GLM-5.2 abandons thinking at `minimal`).
+| Model | Tiers | Default |
+|---|---|---|
+| `deepseek-v4.1-flash-1017` | Low / High / Max + Off | High |
+| `glm-5.2` | High / Max + Off | High |
+
+- **Only distinct tiers are listed.** Upstream accepts a longer enum but collapses it:
+  deepseek maps `minimal→low`, `medium/high/xhigh→high`, `ultra/max→max`; glm-5.2 maps
+  `low/medium→high`, `xhigh→max`. Listing the collapsed aliases would let a user switch
+  tiers with no visible effect. Measurements: [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4.
+- **Default is High** — sent explicitly instead of relying on the upstream default.
+- **Off really disables thinking**: it sends `reasoning_effort: "none"`, which was measured
+  to drive `reasoning_tokens` to zero. Off is only offered for models that accept it.
+- **A thinking model with no tier list** (e.g. GLM-5.1, which only declares
+  `thinking_mode: on`) shows no tier selector — upstream publishes no enum for it.
 
 ## Configure
 

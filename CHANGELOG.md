@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.3
+
+- **思考强度按模型给**：DeepSeek V4.1 Flash 显示 `Low / High / Max`，GLM-5.2 显示
+  `High / Max` —— 上游会折叠同义档（DeepSeek `minimal→low`、`medium/high/xhigh→high`、
+  `ultra/max→max`；GLM-5.2 `low/medium→high`、`xhigh→max`），只列有区别的档位。
+- **默认 High**（两个模型都是），DSH 选择器会预选它，而不是依赖上游默认值。
+- **新增 Off**：发 `reasoning_effort: none`，实测 `reasoning_tokens` 归零。只对实测接受
+  该值的模型显示 Off。
+- **修掉假档位**：`reasoning=true` 但没有档位表的模型（如只声明 `thinking_mode: on` 的
+  GLM-5.1）不再被 pi-ai 当作「支持 Off/Minimal/Low/Medium/High」而在选择器里显示一堆
+  它根本不能用的档位。
+- **移除失效的隐藏模型**：`deepseek-v4-flash` 在内层通道已回 `403 Invalid model`，
+  不再出现在模型选择器里。
+
 ## 0.1.2
 
 - **思考强度**：上游内层模型只声明 `thinking_mode: "configurable"`（不声明档位），以前被当成非思考模型，

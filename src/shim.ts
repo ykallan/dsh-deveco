@@ -215,6 +215,7 @@ export function contextForModel(
   const ctx: NormalizeContext = {
     model: wireId,
     ...info?.thinking === undefined ? {} : { levels: info.thinking.levels },
+    ...info?.thinking?.offLevel === undefined ? {} : { offLevel: info.thinking.offLevel },
     ...info?.reasoning === true ? { reasoning: true } : {},
     textOnly: info !== undefined && info.supportsImages !== true,
     visionModel: process.env.DEVECO_VISION_MODEL?.trim() || DEFAULT_VISION_MODEL,

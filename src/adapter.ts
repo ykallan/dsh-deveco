@@ -10,7 +10,7 @@
 import { createProvider } from '@earendil-works/pi-ai'
 import type { Api, Model, Provider, ThinkingLevelMap } from '@earendil-works/pi-ai'
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy'
-import { resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { resolveRetryPolicy, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -82,17 +82,32 @@ const REASONING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'm
  * 上游声明的思考档位 → pi-ai 的推理元数据。
  *
  * 上游没声明的档位一律钉成 `null`：pi-ai 把「没写」当成「支持」，漏掉的话界面会给一个
- * 只会 high/max 的模型显示 Off/Minimal/Low/Medium。`off` 同样钉死 —— 上游默认已经在思考，
- * 声称支持 Off 只会发出一个不带档位的请求，然后照样思考。
+ * 只会 high/max 的模型显示 Off/Minimal/Low/Medium。
+ *
+ * `off` 单独处理：只有模型实测接受「关闭思考」的线上取值（`offLevel`，通常是 `none`）时
+ * 才把它映射成字符串，此时选择器里才会出现 Off；否则钉成 `null`（不出现），因为 pi-ai
+ * 会把「没选档位」也走成 `off` 的映射值，等于默认替用户关掉思考。
+ *
+ * 没有任何真正档位时返回 `reasoning: false` —— 这样界面不会给一个没声明档位的模型硬拉出
+ * 一条 Off/Minimal/Low/Medium/High 的假阶梯（上游根本没这些枚举）。
  */
-export function thinkingFields(strengths: readonly string[] | undefined): {
+export function thinkingFields(
+  strengths: readonly string[] | undefined,
+  offLevel?: string,
+): {
   reasoning: boolean
   thinkingLevelMap?: ThinkingLevelMap
 } {
   const offered = new Set(strengths ?? [])
   if (!REASONING_LEVELS.some(level => level !== 'off' && offered.has(level))) return { reasoning: false }
   const map = {} as Record<(typeof REASONING_LEVELS)[number], string | null>
-  for (const level of REASONING_LEVELS) map[level] = offered.has(level) ? level : null
+  for (const level of REASONING_LEVELS) {
+    if (level === 'off') {
+      map.off = offLevel === undefined ? null : offLevel
+      continue
+    }
+    map[level] = offered.has(level) ? level : null
+  }
   return { reasoning: true, thinkingLevelMap: map }
 }
 
@@ -103,8 +118,11 @@ export function thinkingFields(strengths: readonly string[] | undefined): {
  * 它和 `contextWindow` 完全无关。给太小（曾经兜底 8192）会让长回答与推理在中途被截断。
  */
 export function piModelFor(info: DevecoModelInfo, baseUrl: string): Model<Api> {
-  const thinking = thinkingFields(info.thinking?.levels)
-  const reasoning = info.reasoning === true || thinking.reasoning
+  const thinking = thinkingFields(info.thinking?.levels, info.thinking?.offLevel)
+  // **只用档位表决定 reasoning**：`info.reasoning` 为真但没有档位表的模型（例如只声明
+  // `thinking_mode: on` 的 GLM-5.1）不该被 pi-ai 当成「什么档位都支持」，否则选择器会
+  // 显示它根本不能用的档位。思考内容本身仍由 shim 按 `ctx.reasoning` 显式索要。
+  const reasoning = thinking.reasoning
   const ceiling = outputCeiling()
   const declared = info.maxTokens > 0 ? info.maxTokens : ceiling
   return {
@@ -202,7 +220,23 @@ class DevecoPiAiAdapter extends PiAiAdapter {
     return models.filter(model => !catalogIds.has(model.id) || allowedIds.has(model.id))
   }
 
+  /**
+   * 给每个模型补上它自己的默认思考档位。
+   *
+   * dsh-llm-pi-ai 的 `defaultEffort` 只来自 provider 级 profile，而本 provider 下不同模型的
+   * 档位集合不同（DeepSeek low/high/max、GLM-5.2 high/max），用一个 provider 级默认值要么
+   * 给错模型、要么对没有档位的模型直接抛 UNSUPPORTED。所以在模型级注入：
+   * 只有该模型自己的档位表里确实有这个默认值时，才写 `defaultEffort`。
+   */
   override async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    return super.resolveModel(provider, model, signal)
+    const info = await super.resolveModel(provider, model, signal)
+    const entry = this.catalog.find(model)
+    const wanted = entry?.thinking?.default
+    if (wanted === undefined || info.reasoning === undefined) return info
+    if (!info.reasoning.efforts.some(effort => effort.id === wanted)) return info
+    return {
+      ...info,
+      reasoning: { ...info.reasoning, defaultEffort: ReasoningEffortId(wanted) },
+    }
   }
 }

@@ -28,6 +28,13 @@ export interface NormalizeContext {
   model: string
   /** 上游声明的思考档位；缺省 = 这条模型没声明档位。 */
   levels?: readonly string[]
+  /**
+   * 「关闭思考」在上游线上对应的 `reasoning_effort` 值（实测 `none`）。
+   *
+   * 有值时，`none`/`off` 会原样发成这个值（真正关闭思考）；没有值时按旧规则丢弃 ——
+   * 因为对不支持关闭思考的模型发 `none` 会被上游 400。
+   */
+  offLevel?: string
   /** 这条模型是思考模型（要显式索要思考内容）。 */
   reasoning?: boolean
   /** 纯文本模型（收到图片要改路由）。 */
@@ -193,6 +200,23 @@ export function normalizeReasoningEffort(body: Record<string, unknown>, ctx: Nor
     delete next.reasoning_effort
     return { body: next, changed: true, notes: ['effort-dropped-empty'] }
   }
+  // 「关闭思考」优先处理：不能让它落到 snapEffort 里被吸附成 low（实测上游 none 真的
+  // 能让 reasoning_tokens 归零，吸附成 low 就等于用户想关却变成了轻思考）。
+  const wantsOff = value === 'none' || value === 'off'
+  if (wantsOff) {
+    if (ctx.offLevel !== undefined) {
+      if (body.reasoning_effort === ctx.offLevel) return { body, changed: false, notes: [] }
+      return {
+        body: { ...body, reasoning_effort: ctx.offLevel },
+        changed: true,
+        notes: ['thinking-disabled'],
+      }
+    }
+    const next = { ...body }
+    delete next.reasoning_effort
+    if ((ctx.levels ?? []).length === 0) next.thinking = { type: 'disabled' }
+    return { body: next, changed: true, notes: ['effort-dropped-undeclared'] }
+  }
   const levels = ctx.levels ?? []
   if (levels.length > 0) {
     const snapped = snapEffort(value, levels)
@@ -203,12 +227,6 @@ export function normalizeReasoningEffort(body: Record<string, unknown>, ctx: Nor
     }
     if (snapped === value) return { body, changed: false, notes: [] }
     return { body: { ...body, reasoning_effort: snapped }, changed: true, notes: ['effort-snapped'] }
-  }
-  if (value === 'none' || value === 'off') {
-    const next = { ...body }
-    delete next.reasoning_effort
-    next.thinking = { type: 'disabled' }
-    return { body: next, changed: true, notes: ['thinking-disabled'] }
   }
   if ((EFFORT_ORDER as readonly string[]).includes(value)) {
     return value === effort

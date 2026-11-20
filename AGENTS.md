@@ -78,11 +78,13 @@ src/client/*       浏览器侧：卡片、底部状态行、侧边栏页
   `max_tokens` 时直接拿它当天花板，而推理与正文共享这个额度 —— 给它一个保守小值（曾经是
   8192）会让 1M 上下文的模型在推理中途被截断。上游没给 `output` 时用
   `DEVECO_OUTPUT_CEILING`（32K），不要退回小数字。
-- **思考强度**：上游 `thinking_mode` 有 `on` / `off` / `configurable` 三个值，`configurable`
-  同样是思考模型（内层 `deepseek-v4.1-flash-1017`、`glm-5.2` 只发这个值）。它们不给
-  `reasoning_effort` 档位时用 `CONFIGURABLE_THINKING_LEVELS` 补（实测可用集合，见
-  `catalog.ts`）；`off` 必须钉成 `null`，否则 pi-ai 会把「没选档位」当成 `reasoning_effort: none`
-  —— 默认帮所有人关掉思考。
+- **思考强度按模型给**：档位表在 `catalog.ts`（`DEEPSEEK_THINKING_LEVELS` /
+  `GLM52_THINKING_LEVELS`），默认 `high`，`offLevel: 'none'` 表示该模型支持选 Off。
+  只放**有区别**的档位 —— 上游会折叠同义档（`minimal→low`、`xhigh→high` …），把别名也列出来
+  会让用户以为换了档位却毫无变化。模型没有档位表时（只声明 `thinking_mode: on`）不要给
+  pi-ai 一个空 map：pi-ai 把「未声明」当支持，界面会显示模型根本不能用的档位。
+  `none` 不能被 `snapEffort` 吸附成 `low`（用户想关思考，结果变成轻思考）——
+  `normalizeReasoningEffort` 里对 off/none 有单独分支。
 - **签到不要变成「领积分」**：上游没有这个接口（`docs/PROTOCOL.md` 第 6 节）。它是每日体检。
 - 续期必须单飞并带代际：`refreshToken` 一次性，并发刷新会把账号写成 stale。
 - **续期时机在「取号发请求前」**：`accessToken()` 每次检查剩余寿命，低于

@@ -19,7 +19,7 @@
 | **华为账号登录** | 浏览器授权 + 本机回环回调（`127.0.0.1:10101 / 34567–34570`），不需要命令行工具、不需要填 API Key |
 | **多账号管理** | 每个账号独立凭证与续期；卡片上可暂停、置顶、改备注、刷新凭证、删除；请求失败自动换号重试 |
 | **动态模型目录** | 启动时与每小时从上游 `codeGenie/modelConfig` 拉一次，按账号取并集；可勾选只暴露部分模型 |
-| **思考强度** | 模型声明了档位（GLM-5.3：Low/High/Max）就按声明显示；只声明 `thinking_mode: configurable` 的模型（glm-5.2、deepseek-v4.1-flash-1017）按实测可用档位显示 Minimal → Max |
+| **思考强度** | 按模型各自的真实能力显示档位（DeepSeek：Low/High/Max，GLM-5.2：High/Max），默认 High，并支持选 Off 真正关闭思考 |
 | **每日签到** | 每天每个账号做一次真实体检（凭证是否还有效、模型目录是否还能拉到），记录结果与连续天数 |
 | **额度窗口** | 按上游的重置时刻（默认每日 08:00）划分窗口，显示重置倒计时、本窗口本机用量、以及被上游判「额度用尽」的账号；「刷新额度」重新探测账号可用性 |
 | **本机用量账本** | 记录经本插件发出的请求数与 token 用量（按天/账号/模型聚合），卡片与底部状态行都能看 |
@@ -80,15 +80,22 @@ npm 而换来一次 `ERR_PNPM_FETCH_404` 并回滚安装。脚本幂等，重跑
 
 ## 思考强度
 
-模型选择器旁边会出现思考档位：`Minimal / Low / Medium / High / Xhigh / Max`。
+模型选择器旁边会出现思考档位，**按每个模型自己的能力给**（不是所有人共用一张长列表）：
 
-- **上游声明了档位的模型**（`GLM-5.3` 声明 `low|high|max`）只显示声明的档位，选别的也只会吸附到最近的一档；
-- **只声明 `thinking_mode: "configurable"` 的模型**（`glm-5.2`、`deepseek-v4.1-flash-1017`）上游其实接受这六档
-  （实测 `none|minimal|low|medium|high|xhigh|max`，见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4），插件把实测集合补上；
-- **没有 Off**：不选档位时插件**不发** `reasoning_effort`，让上游用它自己的默认
-  （deepseek 默认 high、glm-5.2 默认 max）。如果把 Off 也做成可选，pi-ai 在「没选档位」时
-  同样会发出 `reasoning_effort: none` —— 等于默认帮所有人关掉思考，这是不能接受的。
-  想尽量少思考就用 `Minimal`（GLM-5.2 在 `minimal` 下会直接放弃思考）。
+| 模型 | 档位 | 默认 |
+|---|---|---|
+| `deepseek-v4.1-flash-1017` | Low / High / Max + Off | High |
+| `glm-5.2` | High / Max + Off | High |
+
+- **只放真正有区别的档位**。上游接受更长的枚举，但会折叠：DeepSeek 的
+  `minimal→low`、`medium/high/xhigh→high`、`ultra/max→max`；GLM-5.2 的
+  `low/medium→high`、`xhigh→max`。把没区别的档位摆出来只会让人以为换了档位却没变化。
+  实测明细见 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4。
+- **默认 High**：不选档位时按 High 发送，而不是让上游用它自己的默认值。
+- **Off 可以选**：Off 发的是 `reasoning_effort: none`，实测 `reasoning_tokens` 归零，
+  即真正关闭思考。只有实测接受这个值的模型才显示 Off。
+- **没有档位表的思考模型**（例如只声明 `thinking_mode: on` 的 GLM-5.1）不显示档位选择器
+  —— 上游没给它的档位枚举，硬猜一个只会发错。
 
 ## 额度：没有「剩余额度」可以查，每天大概有1亿额度
 

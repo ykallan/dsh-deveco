@@ -752,10 +752,17 @@ declare namespace MockInterceptor {
  */
 /** 上游声明的思考强度。 */
 interface DevecoModelThinking {
-  /** 可选档位（上游 `reasoning_effort.level` 的原值，如 `['low','high','max']`）。 */
+  /** 可选档位（上游 `reasoning_effort` 的原值，如 `['low','high','max']`）。 */
   levels: readonly string[];
-  /** 上游默认档位。目前只用于展示/诊断，DSH 的默认档位不由它决定。 */
+  /** 默认档位。DSH 会把它当作该模型的默认选择。 */
   default?: string;
+  /**
+   * 「关闭思考」在线上对应的 `reasoning_effort` 值（实测为 `none`）。
+   *
+   * 只有上游确实接受这个值的模型才设置；设置后选择器里才会出现 Off。不设置时 Off
+   * 不会出现（pi-ai 会把 `off` 钉成 `null`），避免给不支持关闭思考的模型发一个会 400 的值。
+   */
+  offLevel?: string;
 }
 /** 一个暴露给 DSH 的模型。 */
 interface DevecoModelInfo {
@@ -785,7 +792,12 @@ interface DevecoModelInfo {
  * 只给**发现到的**模型补参数，绝不会因为这里有条目就把模型塞进目录。
  */
 declare const FALLBACK_PARAMS: readonly DevecoModelInfo[];
-/** 隐藏模型：上游目录里没有，但确实能调。 */
+/**
+ * 隐藏模型：上游目录里没有，但确实能调。
+ *
+ * 目前为空：`deepseek-v4-flash` 曾经能用，但 2026-11-20 实测内层通道已经回
+ * `403 Invalid model` —— 再摆进选择器只会让人选到一个必然失败的模型。
+ */
 declare const HIDDEN_MODELS: readonly DevecoModelInfo[];
 /** 可变目录，由 shim 的 `/v1/models` 与适配器共享。 */
 declare class DevecoCatalog {

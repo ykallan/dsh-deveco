@@ -63,18 +63,34 @@ describe('piModelFor', () => {
   it('offers every switchable tier for the configurable inner models, but never Off', () => {
     const model = piModelFor(info({
       reasoning: true,
-      thinking: { levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+      thinking: { levels: ['low', 'high', 'max'] },
     }), 'http://x/v1')
     expect(model.reasoning).toBe(true)
     expect(model.thinkingLevelMap).toMatchObject({
       off: null,
-      minimal: 'minimal',
+      minimal: null,
       low: 'low',
-      medium: 'medium',
+      medium: null,
       high: 'high',
-      xhigh: 'xhigh',
+      xhigh: null,
       max: 'max',
     })
+  })
+
+  it('exposes Off only when the model accepts a wire value that disables thinking', () => {
+    const model = piModelFor(info({
+      reasoning: true,
+      thinking: { levels: ['low', 'high', 'max'], offLevel: 'none' },
+    }), 'http://x/v1')
+    expect(model.thinkingLevelMap?.off).toBe('none')
+  })
+
+  it('does not invent a tier ladder for a thinking model that declares no tiers', () => {
+    // 回归：`info.reasoning=true` 但没有任何档位（例如只声明 thinking_mode:on 的 GLM-5.1），
+    // pi-ai 会把「未声明」当支持，界面于是显示它根本不能用的 Off/Minimal/Low/Medium/High。
+    const model = piModelFor(info({ reasoning: true }), 'http://x/v1')
+    expect(model.reasoning).toBe(false)
+    expect(model.thinkingLevelMap).toBeUndefined()
   })
 })
 
@@ -89,5 +105,10 @@ describe('thinkingFields', () => {
     expect(fields.reasoning).toBe(true)
     expect(fields.thinkingLevelMap?.off).toBeNull()
     expect(fields.thinkingLevelMap?.high).toBe('high')
+  })
+
+  it('maps off to the disabling wire value when the model supports it', () => {
+    expect(thinkingFields(['high', 'max'], 'none').thinkingLevelMap?.off).toBe('none')
+    expect(thinkingFields(['high', 'max']).thinkingLevelMap?.off).toBeNull()
   })
 })

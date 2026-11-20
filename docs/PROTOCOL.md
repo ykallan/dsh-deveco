@@ -91,17 +91,24 @@ grace so a wedged release cannot stall the local queue.
    drop anything that cannot be mapped. For models declaring no tiers, standard values
    pass through and `none`/`off` become `thinking: { type: "disabled" }`.
    The two inner ("mass") models — `deepseek-v4.1-flash-1017` and `glm-5.2` — declare
-   `thinking_mode: "configurable"` but **no** tier list; measured on 2026-11-20 they both
-   accept `none|minimal|low|medium|high|xhigh|max` (GLM-5.2 answers a bad value with
-   `reasoning_effort must be [none, minimal, low, medium, high, xhigh, max] for glm-5.2`).
-   `deepseek-v4.1-flash-1017` also accepts `ultra`, GLM-5.2 does not, so `ultra` stays out
-   of the shared set. `none` really does stop thinking (reasoning tokens become 0), but the
-   plugin does not offer it: pi-ai sends the mapped `off` value for "no level selected" as
-   well, which would silently turn thinking off for everyone who never picked a tier.
+   `thinking_mode: "configurable"` but **no** tier list. Measured on 2026-11-20, the wire
+   accepts (error text quotes the enum verbatim):
+
+   | Model | Accepted `reasoning_effort` | Distinct tiers |
+   |---|---|---|
+   | `deepseek-v4.1-flash-1017` | `none, minimal, low, medium, high, xhigh, ultra, max` | `low, high, max` |
+   | `glm-5.2` | `none, minimal, low, medium, high, xhigh, max` (no `ultra` → 400) | `high, max` |
+
+   Both collapse the extra values (deepseek: `minimal→low`, `medium/high/xhigh→high`,
+   `ultra/max→max`; glm-5.2: `low/medium→high`, `xhigh→max`), so the plugin only offers
+   the distinct column — a selector full of aliases that all send the same thing is a lie.
+   `reasoning_effort: "none"` really disables thinking (measured `reasoning_tokens: 0`), so
+   it is offered as Off **for these two models only**; a model that rejects it must never
+   be sent it. Defaults are `high` for both, sent explicitly.
 5. Thinking must be requested explicitly (`chat_template_kwargs.enable_thinking: true`).
    Otherwise GLM writes its reasoning into `content`, terminated by a stray `</think>`.
    Both inner models accept this kwarg too (verified), and `reasoning_effort: "none"`
-   still wins over it, so "no effort" and "explicit thinking" do not conflict.
+   still wins over it, so Off keeps `reasoning_tokens` at 0 even with the kwarg present.
 6. Images on a text-only model are a 403. Reroute the turn to the vision model and drop
    `tools`/`tool_choice` (that model emits tool calls as text); if only the history holds
    images, replace them with `[图片]` and keep the current model.

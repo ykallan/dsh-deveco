@@ -141,10 +141,12 @@ export function outputCeiling(): number {
 }
 
 /**
- * 隐藏模型：不在模型目录里，但确实能调。用户手工写进 `enabledModels`
- * 或对话模型选择里仍然可用。
+ * 隐藏模型：不在模型目录里，但确实能调。
+ *
+ * 2026-11-20 起为空：`deepseek-v4-flash` 在内层通道已经返回 `403 Invalid model`，
+ * 留在选择器里只会让人选到一个必然失败的模型。上游恢复后把 id 加回这里即可。
  */
-export const HIDDEN_MODEL_IDS = ['deepseek-v4-flash'] as const
+export const HIDDEN_MODEL_IDS: readonly string[] = []
 
 /**
  * 对外模型 id ↔ 上游 wire id。

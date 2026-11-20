@@ -9,8 +9,9 @@ import {
 } from '../src/discovery.ts'
 import {
   backfillParams,
-  CONFIGURABLE_THINKING_LEVELS,
+  DEEPSEEK_THINKING_LEVELS,
   filterEnabledModels,
+  GLM52_THINKING_LEVELS,
   HIDDEN_MODELS,
   mergeModelLists,
 } from '../src/catalog.ts'
@@ -238,8 +239,12 @@ describe('catalog helpers', () => {
     expect(filled?.reasoning).toBe(true)
   })
 
-  it('backfills switchable effort tiers for the configurable inner models', () => {
-    for (const wireId of ['glm-5.2', 'deepseek-v4.1-flash-1017']) {
+  it('backfills each configurable model its own distinct effort tiers', () => {
+    const cases: [string, readonly string[], string][] = [
+      ['deepseek-v4.1-flash-1017', DEEPSEEK_THINKING_LEVELS, 'high'],
+      ['glm-5.2', GLM52_THINKING_LEVELS, 'high'],
+    ]
+    for (const [wireId, levels, defaultLevel] of cases) {
       const [filled] = backfillParams([{
         id: wireId,
         wireId,
@@ -249,8 +254,16 @@ describe('catalog helpers', () => {
         supportsImages: false,
       }])
       expect(filled?.reasoning).toBe(true)
-      expect(filled?.thinking?.levels).toEqual([...CONFIGURABLE_THINKING_LEVELS])
+      expect(filled?.thinking?.levels).toEqual([...levels])
+      expect(filled?.thinking?.default).toBe(defaultLevel)
+      expect(filled?.thinking?.offLevel).toBe('none')
     }
+  })
+
+  it('gives the two configurable models different tier lists', () => {
+    // 实测 GLM-5.2 没有 low（low 会折叠成 high），DeepSeek 有 —— 共用一份表就是错的。
+    expect([...DEEPSEEK_THINKING_LEVELS]).toEqual(['low', 'high', 'max'])
+    expect([...GLM52_THINKING_LEVELS]).toEqual(['high', 'max'])
   })
 
   it('keeps upstream-declared tiers instead of the fallback ones', () => {
@@ -288,7 +301,8 @@ describe('catalog helpers', () => {
     expect(filterEnabledModels([glm51, glm53], ['glm-5.3-deveco']).map(model => model.wireId)).toEqual(['GLM-5.3'])
   })
 
-  it('exposes the hidden deepseek model separately', () => {
-    expect(HIDDEN_MODELS.map(model => model.wireId)).toContain('deepseek-v4-flash')
+  it('exposes no unusable hidden model', () => {
+    // deepseek-v4-flash 实测已被上游判 403 Invalid model，不能再摆进选择器。
+    expect(HIDDEN_MODELS).toEqual([])
   })
 })

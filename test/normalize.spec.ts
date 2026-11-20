@@ -129,6 +129,30 @@ describe('normalizeReasoningEffort', () => {
     expect(result.changed).toBe(false)
   })
 
+  it('sends the disabling wire value instead of snapping none to low', () => {
+    // 回归：有档位表的模型收到 none 时，绝不能吸附成 low —— 用户想关思考却变成轻思考。
+    const result = normalizeReasoningEffort(
+      { reasoning_effort: 'none' },
+      { model: 'deepseek-v4.1-flash-1017', levels: ['low', 'high', 'max'], offLevel: 'none' },
+    )
+    expect(result.body.reasoning_effort).toBe('none')
+    expect('thinking' in result.body).toBe(false)
+  })
+
+  it('treats off the same way as none', () => {
+    const result = normalizeReasoningEffort(
+      { reasoning_effort: 'off' },
+      { model: 'glm-5.2', levels: ['high', 'max'], offLevel: 'none' },
+    )
+    expect(result.body.reasoning_effort).toBe('none')
+  })
+
+  it('drops none for a model that declares tiers but cannot disable thinking', () => {
+    const result = normalizeReasoningEffort({ reasoning_effort: 'none' }, { model: 'GLM-5.3', levels: ['low', 'high', 'max'] })
+    expect('reasoning_effort' in result.body).toBe(false)
+    expect('thinking' in result.body).toBe(false)
+  })
+
   it('drops non-string efforts', () => {
     const result = normalizeReasoningEffort({ reasoning_effort: 3 }, { model: 'GLM-5.1' })
     expect('reasoning_effort' in result.body).toBe(false)

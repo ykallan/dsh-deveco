@@ -25,26 +25,37 @@ import {
 
 /** 上游声明的思考强度。 */
 export interface DevecoModelThinking {
-  /** 可选档位（上游 `reasoning_effort.level` 的原值，如 `['low','high','max']`）。 */
+  /** 可选档位（上游 `reasoning_effort` 的原值，如 `['low','high','max']`）。 */
   levels: readonly string[]
-  /** 上游默认档位。目前只用于展示/诊断，DSH 的默认档位不由它决定。 */
+  /** 默认档位。DSH 会把它当作该模型的默认选择。 */
   default?: string
+  /**
+   * 「关闭思考」在线上对应的 `reasoning_effort` 值（实测为 `none`）。
+   *
+   * 只有上游确实接受这个值的模型才设置；设置后选择器里才会出现 Off。不设置时 Off
+   * 不会出现（pi-ai 会把 `off` 钉成 `null`），避免给不支持关闭思考的模型发一个会 400 的值。
+   */
+  offLevel?: string
 }
 
 /**
- * 「可配置思考」模型的档位表。
+ * 每个模型**真正有区别**的思考档位（2026-11-20 实测，映射表见 `docs/PROTOCOL.md` §4）。
  *
- * 上游内层模型（`deepseek-v4.1-flash-1017`、`glm-5.2`）只给 `thinking_mode: "configurable"`，
- * 不给 `reasoning_effort`，所以档位要靠这里补。这组值是**实测**上游接受的集合：
- * 两个模型都接受 `minimal|low|medium|high|xhigh|max`，超出集合的值会被上游 400
- * （例如 `glm-5.2` 明确回 `reasoning_effort must be [none, minimal, low, medium, high, xhigh, max]`）。
+ * 上游其实接受更长的枚举（DeepSeek 还收 `minimal|medium|xhigh|ultra`，GLM-5.2 还收
+ * `minimal|low|medium|xhigh`），但多出来的值都会被上游折叠到同一档：
  *
- * **为什么不放 `none`**：pi-ai 在「用户没选档位」时也走「不带 reasoningEffort」那条路，
- * 而 `thinkingLevelMap.off` 是个字符串时它会把 `reasoning_effort: none` 发出去 —— 等于让
- * 所有没选档位的请求都默认关闭思考。所以 `off` 必须钉成 `null`（选择器里不出现），
- * 让「没选」保持「不发送档位、走上游默认」。
+ * - DeepSeek V4.1 Flash：`minimal→low`、`medium/high/xhigh→high`、`ultra/max→max`
+ *   → 真正有区别的只有 **low / high / max**；
+ * - GLM-5.2：`minimal` 等于放弃思考、`low/medium→high`、`xhigh→max`
+ *   → 真正有区别的只有 **high / max**。
+ *
+ * 只暴露有区别的档位，选择器里就不会出现「选了什么都没变」的选项。
  */
-export const CONFIGURABLE_THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+export const DEEPSEEK_THINKING_LEVELS = ['low', 'high', 'max'] as const
+export const GLM52_THINKING_LEVELS = ['high', 'max'] as const
+
+/** 关闭思考在上游线上的取值。实测 DeepSeek 与 GLM-5.2 都接受，reasoning_tokens 归零。 */
+export const THINKING_OFF_LEVEL = 'none'
 
 /** 一个暴露给 DSH 的模型。 */
 export interface DevecoModelInfo {
@@ -116,9 +127,13 @@ export const FALLBACK_PARAMS: readonly DevecoModelInfo[] = [
     contextWindowKnown: true,
     maxTokens: DEVECO_OUTPUT_CEILING,
     supportsImages: false,
-    // 上游只给 `thinking_mode: "configurable"`，不给档位；实测接受下面六档（默认 max）。
+    // 上游只给 `thinking_mode: "configurable"`；档位按官方映射表折叠后的实测差别补。
     reasoning: true,
-    thinking: { levels: [...CONFIGURABLE_THINKING_LEVELS], default: 'max' },
+    thinking: {
+      levels: [...GLM52_THINKING_LEVELS],
+      default: 'high',
+      offLevel: THINKING_OFF_LEVEL,
+    },
   },
   {
     id: 'deepseek-v4.1-flash-1017',
@@ -128,13 +143,21 @@ export const FALLBACK_PARAMS: readonly DevecoModelInfo[] = [
     contextWindowKnown: true,
     maxTokens: DEVECO_OUTPUT_CEILING,
     supportsImages: true,
-    // 同上：`thinking_mode: "configurable"`，实测接受六档（默认 high）。
     reasoning: true,
-    thinking: { levels: [...CONFIGURABLE_THINKING_LEVELS], default: 'high' },
+    thinking: {
+      levels: [...DEEPSEEK_THINKING_LEVELS],
+      default: 'high',
+      offLevel: THINKING_OFF_LEVEL,
+    },
   },
 ]
 
-/** 隐藏模型：上游目录里没有，但确实能调。 */
+/**
+ * 隐藏模型：上游目录里没有，但确实能调。
+ *
+ * 目前为空：`deepseek-v4-flash` 曾经能用，但 2026-11-20 实测内层通道已经回
+ * `403 Invalid model` —— 再摆进选择器只会让人选到一个必然失败的模型。
+ */
 export const HIDDEN_MODELS: readonly DevecoModelInfo[] = HIDDEN_MODEL_IDS.map(id => ({
   id,
   wireId: id,
@@ -143,8 +166,6 @@ export const HIDDEN_MODELS: readonly DevecoModelInfo[] = HIDDEN_MODEL_IDS.map(id
   contextWindowKnown: true,
   maxTokens: 32_000,
   supportsImages: false,
-  reasoning: true,
-  thinking: { levels: [...CONFIGURABLE_THINKING_LEVELS], default: 'high' },
   hidden: true,
 }))
 

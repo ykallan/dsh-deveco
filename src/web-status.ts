@@ -99,6 +99,10 @@ export interface DevecoWebModel {
   reasoning?: boolean
   /** 上游声明的思考档位。 */
   levels?: readonly string[]
+  /** 默认档位（DSH 选择器会预选它）。 */
+  defaultLevel?: string
+  /** 该模型支持「关闭思考」时，线上对应的取值（通常 `none`）。 */
+  offLevel?: string
   hidden?: boolean
 }
 
@@ -247,6 +251,8 @@ function toWebModel(model: DevecoModelInfo): DevecoWebModel {
     ...model.supportsImages ? { supportsImages: true } : {},
     ...model.reasoning ? { reasoning: true } : {},
     ...model.thinking === undefined ? {} : { levels: model.thinking.levels },
+    ...model.thinking?.default === undefined ? {} : { defaultLevel: model.thinking.default },
+    ...model.thinking?.offLevel === undefined ? {} : { offLevel: model.thinking.offLevel },
     ...model.hidden ? { hidden: true } : {},
   }
 }
