@@ -754,7 +754,7 @@ declare namespace MockInterceptor {
 interface DevecoModelThinking {
   /** 可选档位（上游 `reasoning_effort.level` 的原值，如 `['low','high','max']`）。 */
   levels: readonly string[];
-  /** 上游默认档位。 */
+  /** 上游默认档位。目前只用于展示/诊断，DSH 的默认档位不由它决定。 */
   default?: string;
 }
 /** 一个暴露给 DSH 的模型。 */
@@ -770,7 +770,7 @@ interface DevecoModelInfo {
   contextWindowKnown?: boolean;
   maxTokens: number;
   supportsImages: boolean;
-  /** 是不是思考模型（上游 `thinking_mode === 'on'`）。 */
+  /** 是不是思考模型（上游 `thinking_mode` 为 `on` 或 `configurable`）。 */
   reasoning?: boolean;
   /** 支持工具调用（上游 `tool_call_mode === 'tool_calls'`）。 */
   toolCall?: boolean;

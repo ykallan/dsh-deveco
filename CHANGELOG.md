@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- **思考强度**：上游内层模型只声明 `thinking_mode: "configurable"`（不声明档位），以前被当成非思考模型，
+  DSH 的模型选择器里没有思考档位。现在 `configurable` 也算思考模型，并为 `glm-5.2`、
+  `deepseek-v4.1-flash-1017` 与隐藏模型 `deepseek-v4-flash` 补上实测可用的档位
+  （`minimal|low|medium|high|xhigh|max`）。上游自己声明档位的模型（GLM-5.3 的 `low|high|max`）仍以声明为准。
+  不提供 Off：未选择档位时不发 `reasoning_effort`，保持上游默认。
+
 ## 0.1.1
 
 - **安装**：构建产物 `lib/` 随仓库提交。GitHub（`github:ykallan/dsh-deveco`）与本地目录安装均无需再自行构建；
