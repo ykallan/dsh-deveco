@@ -153,6 +153,20 @@ export function expandSuspiciousCount(value: number | undefined, floor: number):
   return value < floor ? value * 1024 : value
 }
 
+/**
+ * 上游 `thinking_mode`（`on` / `off` / `configurable`）→ 这个模型要不要宣告思考能力。
+ *
+ * 以前只认 `'on'`，于是 `configurable` 的内层模型（`deepseek-v4.1-flash-1017`、`glm-5.2`）
+ * 在 DSH 里被当成「不思考的模型」：不但没有思考强度选择器，连 `chat_template_kwargs`
+ * 都不发。实测这两个模型默认就思考，而且接受 `reasoning_effort` 档位。
+ */
+export function isThinkingMode(raw: unknown): boolean {
+  if (raw === true) return true
+  if (typeof raw !== 'string') return false
+  const value = raw.trim().toLowerCase()
+  return value === 'on' || value === 'configurable'
+}
+
 /** 一条 `model_configs` 条目 → 目录项；无法识别时 undefined。 */
 export function toModelInfo(entry: ModelConfigEntry): DevecoModelInfo | undefined {
   const wireId = typeof entry.model_id === 'string' ? entry.model_id.trim() : ''
@@ -169,7 +183,7 @@ export function toModelInfo(entry: ModelConfigEntry): DevecoModelInfo | undefine
     supportsImages: modalities.includes('image'),
   }
   if (windows !== undefined) info.contextWindowKnown = true
-  if (entry.thinking_mode === 'on') info.reasoning = true
+  if (isThinkingMode(entry.thinking_mode)) info.reasoning = true
   if (entry.tool_call_mode === 'tool_calls') info.toolCall = true
   const thinking = parseReasoningEfforts(entry.reasoning_effort)
   if (thinking !== undefined) info.thinking = thinking

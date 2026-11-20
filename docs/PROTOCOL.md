@@ -86,12 +86,22 @@ grace so a wedged release cannot stall the local queue.
 3. `tool_choice` is an enum: `"auto" | "none" | "required"` only. An object form fails the
    whole request; emulate a forced tool with `"required"` plus a narrowed `tools` array,
    and degrade to `"auto"` when the tool is not declared.
-4. `reasoning_effort` must be one the model declared. GLM-5.3 declares
-   `low|high|max` (default `high`); snap to the nearest declared tier, drop anything that
-   cannot be mapped. For models declaring no tiers, standard values pass through and
-   `none`/`off` become `thinking: { type: "disabled" }`.
+4. `reasoning_effort` must be one the model declared, or one the channel accepts.
+   GLM-5.3 declares `low|high|max` (default `high`); snap to the nearest declared tier,
+   drop anything that cannot be mapped. For models declaring no tiers, standard values
+   pass through and `none`/`off` become `thinking: { type: "disabled" }`.
+   The two inner ("mass") models — `deepseek-v4.1-flash-1017` and `glm-5.2` — declare
+   `thinking_mode: "configurable"` but **no** tier list; measured on 2026-11-20 they both
+   accept `none|minimal|low|medium|high|xhigh|max` (GLM-5.2 answers a bad value with
+   `reasoning_effort must be [none, minimal, low, medium, high, xhigh, max] for glm-5.2`).
+   `deepseek-v4.1-flash-1017` also accepts `ultra`, GLM-5.2 does not, so `ultra` stays out
+   of the shared set. `none` really does stop thinking (reasoning tokens become 0), but the
+   plugin does not offer it: pi-ai sends the mapped `off` value for "no level selected" as
+   well, which would silently turn thinking off for everyone who never picked a tier.
 5. Thinking must be requested explicitly (`chat_template_kwargs.enable_thinking: true`).
    Otherwise GLM writes its reasoning into `content`, terminated by a stray `</think>`.
+   Both inner models accept this kwarg too (verified), and `reasoning_effort: "none"`
+   still wins over it, so "no effort" and "explicit thinking" do not conflict.
 6. Images on a text-only model are a 403. Reroute the turn to the vision model and drop
    `tools`/`tool_choice` (that model emits tool calls as text); if only the history holds
    images, replace them with `[图片]` and keep the current model.
@@ -132,11 +142,26 @@ Upstream may also send `output` as `"32K"`; expand unit suffixes before using it
       "output": "32000",
       "tool_call_mode": "tool_calls",
       "reasoning_effort": "{\"level\":[\"low\",\"high\",\"max\"],\"default\":\"high\"}"
+    }, {
+      "model_id": "glm-5.2",
+      "thinking_mode": "configurable",
+      "input_modalities": ["text"],
+      "context_window": 198,
+      "tool_call_mode": "tool_calls"
     }] }] } }
 ```
 
+`thinking_mode` has three values: `on` (always thinks), `off` (never thinks) and
+`configurable` (thinking is on by default, tiers can be requested). **`configurable` still
+means a reasoning model** — the two inner models only ever publish this value, and they
+do accept `reasoning_effort` even though the key is absent from their config entry.
+
 `output` may be a string or a number. `reasoning_effort` may also be a plain JSON array on
 older payloads. `task_default_model_map.blacklist` (comma-separated) removes models.
+
+The payload also contains `body.outer_models[]` (external providers: DeepSeek, Z.ai,
+DashScope, OpenAI, Anthropic, Gemini, each with its own `url` and `protocol`). This plugin
+currently serves **inner models only**; `outer_models` is not parsed.
 
 Public ids: `GLM-5.1` / `GLM-5.3` are exposed as `GLM-5.1-DevEco` / `GLM-5.3-DevEco` to
 keep them distinguishable from the public Zhipu models; the wire always carries the bare

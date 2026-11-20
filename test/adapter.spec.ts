@@ -59,6 +59,23 @@ describe('piModelFor', () => {
     expect(model.reasoning).toBe(true)
     expect(model.thinkingLevelMap).toMatchObject({ low: 'low', high: 'high', max: 'max', off: null, minimal: null })
   })
+
+  it('offers every switchable tier for the configurable inner models, but never Off', () => {
+    const model = piModelFor(info({
+      reasoning: true,
+      thinking: { levels: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] },
+    }), 'http://x/v1')
+    expect(model.reasoning).toBe(true)
+    expect(model.thinkingLevelMap).toMatchObject({
+      off: null,
+      minimal: 'minimal',
+      low: 'low',
+      medium: 'medium',
+      high: 'high',
+      xhigh: 'xhigh',
+      max: 'max',
+    })
+  })
 })
 
 describe('thinkingFields', () => {

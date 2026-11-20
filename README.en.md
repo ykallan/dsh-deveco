@@ -15,6 +15,7 @@ check-in and a local usage ledger.
 | **Huawei sign-in** | Browser authorization with a loopback callback (`127.0.0.1:10101 / 34567–34570`). No CLI, no API key. A pasted `jwtToken` also works. |
 | **Multi-account** | One credential doc per profile, per-account refresh (single-flight + generation guard), pause / pin / rename / remove, automatic failover to another account on errors. |
 | **Live model catalog** | Pulled from `codeGenie/modelConfig` at startup and hourly, merged across accounts; an allowlist narrows what the pickers offer. |
+| **Thinking effort** | Models that declare tiers (GLM-5.3: Low/High/Max) show those; models that only publish `thinking_mode: "configurable"` (glm-5.2, deepseek-v4.1-flash-1017) show the measured Minimal → Max set. |
 | **Daily check-in** | DevEco exposes no points or claim endpoint (see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §6), so the check-in is a real daily probe: fetch each account's catalog, record the result, keep a streak, and mark a rejected credential for re-login. |
 | **Local usage ledger** | Requests and tokens, aggregated by day / account / model. |
 | **Request normalisation** | Role enum, `tool_choice` enum, output-cap clamp, effort snapping, explicit thinking request, vision rerouting. |
@@ -29,6 +30,22 @@ pnpm deploy     # sync lib/ into ~/.dsh/profiles/desktop/node_modules/dsh-deveco
 ```
 
 Restart DSH, then open **Settings → Plugins → DSH DevEco Connect** and sign in.
+
+## Thinking effort
+
+Next to the model picker DSH offers `Minimal / Low / Medium / High / Xhigh / Max`.
+
+- **Models that declare tiers** (`GLM-5.3` declares `low|high|max`) show exactly those, and
+  any other value is snapped to the nearest declared tier.
+- **Models that only publish `thinking_mode: "configurable"`** (`glm-5.2`,
+  `deepseek-v4.1-flash-1017`) accept six tiers upstream (measured:
+  `none|minimal|low|medium|high|xhigh|max`, see [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §4);
+  the plugin backfills that measured set.
+- **There is no Off.** With no tier selected the plugin sends **no** `reasoning_effort`, so
+  the upstream default applies (deepseek: high, glm-5.2: max). Offering Off would make
+  pi-ai send `reasoning_effort: none` for "nothing selected" too, silently disabling
+  thinking for everyone — so `off` is pinned to `null`. Use `Minimal` when you want as
+  little thinking as possible (GLM-5.2 abandons thinking at `minimal`).
 
 ## Configure
 

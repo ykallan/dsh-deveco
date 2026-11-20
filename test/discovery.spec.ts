@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import {
   fetchModelConfig,
+  isThinkingMode,
   parseModelConfig,
   parseReasoningEfforts,
   parseTokenCount,
   toModelInfo,
 } from '../src/discovery.ts'
-import { backfillParams, filterEnabledModels, HIDDEN_MODELS, mergeModelLists } from '../src/catalog.ts'
+import {
+  backfillParams,
+  CONFIGURABLE_THINKING_LEVELS,
+  filterEnabledModels,
+  HIDDEN_MODELS,
+  mergeModelLists,
+} from '../src/catalog.ts'
 
 describe('parseTokenCount', () => {
   it('keeps plain numbers as tokens', () => {
@@ -91,6 +98,22 @@ describe('parseReasoningEfforts', () => {
   })
 })
 
+describe('isThinkingMode', () => {
+  it('treats both on and configurable as thinking-capable', () => {
+    expect(isThinkingMode('on')).toBe(true)
+    expect(isThinkingMode('configurable')).toBe(true)
+    expect(isThinkingMode(' CONFIGURABLE ')).toBe(true)
+    expect(isThinkingMode(true)).toBe(true)
+  })
+
+  it('rejects off and junk', () => {
+    expect(isThinkingMode('off')).toBe(false)
+    expect(isThinkingMode(undefined)).toBe(false)
+    expect(isThinkingMode('')).toBe(false)
+    expect(isThinkingMode(1)).toBe(false)
+  })
+})
+
 describe('toModelInfo', () => {
   it('maps a full entry', () => {
     expect(toModelInfo(GROUP.model_configs[0])).toEqual({
@@ -134,6 +157,13 @@ describe('toModelInfo', () => {
 
   it('detects image input', () => {
     expect(toModelInfo(GROUP.model_configs[2])?.supportsImages).toBe(true)
+  })
+
+  it('treats the inner channel\'s "configurable" thinking mode as reasoning', () => {
+    // 实测上游内层模型给的就是这个值；以前只认 "on"，于是选择器里没有思考强度。
+    const info = toModelInfo({ model_id: 'glm-5.2', thinking_mode: 'configurable' })
+    expect(info?.reasoning).toBe(true)
+    expect(toModelInfo({ model_id: 'glm-5.2', thinking_mode: 'off' })?.reasoning).toBeUndefined()
   })
 
   it('rejects an entry without a model id', () => {
@@ -206,6 +236,34 @@ describe('catalog helpers', () => {
     expect(filled?.contextWindow).toBe(170_000)
     expect(filled?.maxTokens).toBe(32_000)
     expect(filled?.reasoning).toBe(true)
+  })
+
+  it('backfills switchable effort tiers for the configurable inner models', () => {
+    for (const wireId of ['glm-5.2', 'deepseek-v4.1-flash-1017']) {
+      const [filled] = backfillParams([{
+        id: wireId,
+        wireId,
+        name: wireId,
+        contextWindow: 0,
+        maxTokens: 0,
+        supportsImages: false,
+      }])
+      expect(filled?.reasoning).toBe(true)
+      expect(filled?.thinking?.levels).toEqual([...CONFIGURABLE_THINKING_LEVELS])
+    }
+  })
+
+  it('keeps upstream-declared tiers instead of the fallback ones', () => {
+    const [filled] = backfillParams([{
+      id: 'GLM-5.3-DevEco',
+      wireId: 'GLM-5.3',
+      name: 'GLM-5.3-DevEco',
+      contextWindow: 0,
+      maxTokens: 0,
+      supportsImages: false,
+      thinking: { levels: ['low', 'high', 'max'], default: 'high' },
+    }])
+    expect(filled?.thinking?.levels).toEqual(['low', 'high', 'max'])
   })
 
   it('never injects a model that discovery did not return', () => {

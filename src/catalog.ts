@@ -27,9 +27,24 @@ import {
 export interface DevecoModelThinking {
   /** 可选档位（上游 `reasoning_effort.level` 的原值，如 `['low','high','max']`）。 */
   levels: readonly string[]
-  /** 上游默认档位。 */
+  /** 上游默认档位。目前只用于展示/诊断，DSH 的默认档位不由它决定。 */
   default?: string
 }
+
+/**
+ * 「可配置思考」模型的档位表。
+ *
+ * 上游内层模型（`deepseek-v4.1-flash-1017`、`glm-5.2`）只给 `thinking_mode: "configurable"`，
+ * 不给 `reasoning_effort`，所以档位要靠这里补。这组值是**实测**上游接受的集合：
+ * 两个模型都接受 `minimal|low|medium|high|xhigh|max`，超出集合的值会被上游 400
+ * （例如 `glm-5.2` 明确回 `reasoning_effort must be [none, minimal, low, medium, high, xhigh, max]`）。
+ *
+ * **为什么不放 `none`**：pi-ai 在「用户没选档位」时也走「不带 reasoningEffort」那条路，
+ * 而 `thinkingLevelMap.off` 是个字符串时它会把 `reasoning_effort: none` 发出去 —— 等于让
+ * 所有没选档位的请求都默认关闭思考。所以 `off` 必须钉成 `null`（选择器里不出现），
+ * 让「没选」保持「不发送档位、走上游默认」。
+ */
+export const CONFIGURABLE_THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 /** 一个暴露给 DSH 的模型。 */
 export interface DevecoModelInfo {
@@ -44,7 +59,7 @@ export interface DevecoModelInfo {
   contextWindowKnown?: boolean
   maxTokens: number
   supportsImages: boolean
-  /** 是不是思考模型（上游 `thinking_mode === 'on'`）。 */
+  /** 是不是思考模型（上游 `thinking_mode` 为 `on` 或 `configurable`）。 */
   reasoning?: boolean
   /** 支持工具调用（上游 `tool_call_mode === 'tool_calls'`）。 */
   toolCall?: boolean
@@ -101,6 +116,9 @@ export const FALLBACK_PARAMS: readonly DevecoModelInfo[] = [
     contextWindowKnown: true,
     maxTokens: DEVECO_OUTPUT_CEILING,
     supportsImages: false,
+    // 上游只给 `thinking_mode: "configurable"`，不给档位；实测接受下面六档（默认 max）。
+    reasoning: true,
+    thinking: { levels: [...CONFIGURABLE_THINKING_LEVELS], default: 'max' },
   },
   {
     id: 'deepseek-v4.1-flash-1017',
@@ -110,6 +128,9 @@ export const FALLBACK_PARAMS: readonly DevecoModelInfo[] = [
     contextWindowKnown: true,
     maxTokens: DEVECO_OUTPUT_CEILING,
     supportsImages: true,
+    // 同上：`thinking_mode: "configurable"`，实测接受六档（默认 high）。
+    reasoning: true,
+    thinking: { levels: [...CONFIGURABLE_THINKING_LEVELS], default: 'high' },
   },
 ]
 
@@ -122,6 +143,8 @@ export const HIDDEN_MODELS: readonly DevecoModelInfo[] = HIDDEN_MODEL_IDS.map(id
   contextWindowKnown: true,
   maxTokens: 32_000,
   supportsImages: false,
+  reasoning: true,
+  thinking: { levels: [...CONFIGURABLE_THINKING_LEVELS], default: 'high' },
   hidden: true,
 }))
 

@@ -45,7 +45,12 @@ function stubTokenEndpoints(): string[] {
 /** 往回调端口投递一次授权结果。 */
 async function deliverCallback(port: number, params: Record<string, string>): Promise<Response> {
   const query = new URLSearchParams(params).toString()
-  return await realFetch(`http://127.0.0.1:${port}/callback?${query}`, { redirect: 'manual' })
+  // `connection: close` 是必须的：多个用例会轮流在同一个候选端口上起/停回调服务，
+  // 复用 undici 连接池里的旧 socket 会读到 ECONNRESET（与插件逻辑无关的测试抖动）。
+  return await realFetch(`http://127.0.0.1:${port}/callback?${query}`, {
+    redirect: 'manual',
+    headers: { connection: 'close' },
+  })
 }
 
 describe('login helpers', () => {
